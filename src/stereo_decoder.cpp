@@ -5,6 +5,7 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr int kPilotAcquireBlocks = 6;
 constexpr int kPilotLossBlocks = 30;
+constexpr float kMatrixScale = 0.5f;
 }  // namespace
 
 StereoDecoder::StereoDecoder(int inputRate, int outputRate)
@@ -121,14 +122,14 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
         m_delayLine[m_delayPos] = mpx;
         m_delayPos = (m_delayPos + 1) % m_delayLine.size();
 
-        float leftRaw = delayedMpx;
-        float rightRaw = delayedMpx;
+        // MPX mono carries (L+R), so normalize by 2 to match stereo loudness.
+        float leftRaw = delayedMpx * kMatrixScale;
+        float rightRaw = delayedMpx * kMatrixScale;
         if (!m_forceMono && (m_forceStereo || m_stereoDetected)) {
             const float subcarrier = std::cos(2.0f * m_pllPhase);
             const float lr = 2.0f * delayedMpx * subcarrier;
-            // Matrix normalization to keep stereo level close to mono loudness.
-            leftRaw = (delayedMpx + lr) * 0.5f;
-            rightRaw = (delayedMpx - lr) * 0.5f;
+            leftRaw = (delayedMpx + lr) * kMatrixScale;
+            rightRaw = (delayedMpx - lr) * kMatrixScale;
         }
 
         const float leftFilt = filterSample(leftRaw, m_audioTaps, m_leftHistory, m_leftHistPos);
