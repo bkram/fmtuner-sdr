@@ -64,6 +64,18 @@ bool parseIntValue(const std::string& arg, int& out) {
     }
 }
 
+bool parseTefCustomValue(const std::string& arg, int& out) {
+    if (arg.size() != 2) {
+        return false;
+    }
+    if ((arg[0] != '0' && arg[0] != '1') ||
+        (arg[1] != '0' && arg[1] != '1')) {
+        return false;
+    }
+    out = (arg[0] - '0') * 10 + (arg[1] - '0');
+    return true;
+}
+
 bool parseFrequencyHz(const std::string& arg, uint32_t& outHz) {
     if (arg.empty()) {
         return false;
@@ -189,28 +201,14 @@ bool XDRServer::authenticate(const std::string& salt, const std::string& passwor
             strcasecmp(expected.c_str(), passwordHash.c_str()) == 0);
 }
 
-std::string XDRServer::buildLegacyStatus() const {
-    std::ostringstream oss;
-    oss << "F=" << m_frequency
-        << " V=" << m_volume
-        << " G=" << m_gain
-        << " A=" << m_agcMode;
-    return oss.str();
-}
-
 std::string XDRServer::buildXdrStateSnapshot() const {
     std::ostringstream oss;
     oss << "M" << m_mode << "\n"
         << "Y" << m_volume << "\n"
         << "T" << (m_frequency / 1000) << "\n"
         << "D" << m_deemphasis << "\n"
-        << "A" << m_agcMode << "\n";
-
-    if (m_bandwidth >= 0) {
-        oss << "W" << m_bandwidth << "\n";
-    } else {
-        oss << "F" << m_filter << "\n";
-    }
+        << "A" << m_agcMode << "\n"
+        << "W" << m_bandwidth << "\n";
 
     oss << "Z" << m_antenna << "\n"
         << formatGain(m_gain) << "\n"
@@ -502,8 +500,10 @@ void XDRServer::handleXdrClient(int clientSocket, const char* clientIP) {
             }
 
             std::string response = processCommand(line);
-            response += "\n";
-            send(clientSocket, response.c_str(), response.length(), 0);
+            if (!response.empty()) {
+                response += "\n";
+                send(clientSocket, response.c_str(), response.length(), 0);
+            }
         }
     }
     setRecvTimeoutMs(clientSocket, 0);
@@ -545,12 +545,14 @@ std::string XDRServer::processCommand(const std::string& cmd) {
             return "a2";
 
         case 'S':
-            return buildLegacyStatus();
+            // TEF-style protocol uses S* for scan control and quality streaming.
+            // It does not have a legacy one-line status response.
+            return "";
 
         case 'T': {
             uint32_t freqHz = 0;
             if (!parseFrequencyHz(arg, freqHz)) {
-                return "ERR";
+                return "";
             }
             m_frequency = freqHz;
             if (m_freqCallback) {
@@ -562,7 +564,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'Y': {
             int volume = 0;
             if (!parseIntValue(arg, volume)) {
-                return "ERR";
+                return "";
             }
             volume = std::clamp(volume, 0, 100);
             m_volume = volume;
@@ -575,9 +577,12 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'V': {
             int daa = 0;
             if (!parseIntValue(arg, daa)) {
-                return "ERR";
+                return "";
             }
-            daa = std::clamp(daa, -1000, 1000);
+            // TEF alignment: 6 dB steps up to 36 dB.
+            daa = std::clamp(daa, 0, 36);
+            daa = ((daa + 3) / 6) * 6;
+            daa = std::clamp(daa, 0, 36);
             m_daa = daa;
             if (m_alignmentCallback) {
                 m_alignmentCallback(daa);
@@ -587,10 +592,9 @@ std::string XDRServer::processCommand(const std::string& cmd) {
 
         case 'G': {
             int gain = 0;
-            if (!parseIntValue(arg, gain)) {
-                return "ERR";
+            if (!parseTefCustomValue(arg, gain)) {
+                return "";
             }
-            gain = std::clamp(gain, 0, 99);
             m_gain = gain;
             if (m_gainCallback) {
                 m_gainCallback(gain);
@@ -601,9 +605,9 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'A': {
             int agcMode = 0;
             if (!parseIntValue(arg, agcMode)) {
-                return "ERR";
+                return "";
             }
-            agcMode = std::clamp(agcMode, 0, 2);
+            agcMode = std::clamp(agcMode, 0, 3);
             m_agcMode = agcMode;
             if (m_agcCallback) {
                 m_agcCallback(agcMode);
@@ -614,7 +618,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'M': {
             int mode = 0;
             if (!parseIntValue(arg, mode)) {
-                return "ERR";
+                return "";
             }
             mode = std::clamp(mode, 0, 1);
             m_mode = mode;
@@ -627,9 +631,9 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'D': {
             int deemph = 0;
             if (!parseIntValue(arg, deemph)) {
-                return "ERR";
+                return "";
             }
-            deemph = std::clamp(deemph, 0, 1);
+            deemph = std::clamp(deemph, 0, 2);
             m_deemphasis = deemph;
             if (m_deemphasisCallback) {
                 m_deemphasisCallback(deemph);
@@ -637,22 +641,14 @@ std::string XDRServer::processCommand(const std::string& cmd) {
             return "D" + std::to_string(deemph);
         }
 
-        case 'F': {
-            int filter = 0;
-            if (!parseIntValue(arg, filter)) {
-                return "ERR";
-            }
-            m_filter = filter;
-            if (m_filterCallback) {
-                m_filterCallback(filter);
-            }
-            return "F" + std::to_string(filter);
-        }
+        case 'F':
+            // TEF-style backends report bandwidth using 'W'.
+            return "";
 
         case 'W': {
             int bandwidth = 0;
             if (!parseIntValue(arg, bandwidth)) {
-                return "ERR";
+                return "";
             }
             m_bandwidth = bandwidth;
             if (m_bandwidthCallback) {
@@ -664,7 +660,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'Z': {
             int antenna = 0;
             if (!parseIntValue(arg, antenna)) {
-                return "ERR";
+                return "";
             }
             antenna = std::clamp(antenna, 0, 9);
             m_antenna = antenna;
@@ -677,7 +673,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'Q': {
             int squelch = 0;
             if (!parseIntValue(arg, squelch)) {
-                return "ERR";
+                return "";
             }
             squelch = std::clamp(squelch, 0, 100);
             m_squelch = squelch;
@@ -690,7 +686,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'C': {
             int rotator = 0;
             if (!parseIntValue(arg, rotator)) {
-                return "ERR";
+                return "";
             }
             rotator = std::clamp(rotator, -1, 1);
             m_rotator = rotator;
@@ -710,12 +706,12 @@ std::string XDRServer::processCommand(const std::string& cmd) {
             size_t comma = arg.find(',');
             if (comma == std::string::npos) {
                 if (!parseIntValue(arg, interval)) {
-                    return "ERR";
+                    return "";
                 }
             } else {
                 if (!parseIntValue(arg.substr(0, comma), interval) ||
                     !parseIntValue(arg.substr(comma + 1), detector)) {
-                    return "ERR";
+                    return "";
                 }
             }
 
@@ -732,7 +728,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         case 'B': {
             int forceMono = 0;
             if (!parseIntValue(arg, forceMono)) {
-                return "ERR";
+                return "";
             }
             bool mono = (forceMono != 0);
             m_forceMono = mono;
@@ -749,7 +745,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
             return m_guestSession ? "o0,1" : "o1,0";
 
         default:
-            return "ERR";
+            return "";
     }
 }
 

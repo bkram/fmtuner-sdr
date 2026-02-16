@@ -109,7 +109,7 @@ int main(int argc, char* argv[]) {
     RTLTCPClient rtlClient(tcpHost, tcpPort);
     bool rtlConnected = false;
     std::atomic<uint32_t> requestedFrequencyHz(freqKHz * 1000);
-    std::atomic<int> requestedGainDb(std::max(0, gain));
+    std::atomic<int> requestedCustomGain(0);
     std::atomic<int> requestedAGCMode(2);
     std::atomic<int> requestedVolume(100);
     std::atomic<int> requestedDeemphasis(0);
@@ -123,16 +123,25 @@ int main(int argc, char* argv[]) {
             return;
         }
 
-        const bool manualGain = (requestedAGCMode.load() == 0);
-        rtlClient.setGainMode(manualGain);
-        rtlClient.setAGC(!manualGain);
+        // TEF-like AGC threshold profile approximation on RTL-SDR.
+        static constexpr int kAgcToGainDb[4] = {44, 36, 30, 24}; // highest..low
+        const int agcMode = std::clamp(requestedAGCMode.load(), 0, 3);
 
-        if (manualGain) {
-            // rtl_tcp gain command uses 0.1 dB steps; RTL-SDR practical max is ~49.6 dB.
-            const int gainDb = std::clamp(requestedGainDb.load(), 0, 49);
-            const uint32_t gainTenthsDb = static_cast<uint32_t>(gainDb * 10);
-            rtlClient.setGain(gainTenthsDb);
+        int custom = requestedCustomGain.load();
+        const bool ceq = ((custom / 10) % 10) != 0;
+        const bool ims = (custom % 10) != 0;
+
+        int gainDb = kAgcToGainDb[agcMode] + (ceq ? 4 : 0) + (ims ? 2 : 0);
+        if (gain >= 0) {
+            // CLI manual override for debugging.
+            gainDb = gain;
         }
+        gainDb = std::clamp(gainDb, 0, 49);
+
+        // Keep RTL in manual gain for TEF-style predictable threshold behavior.
+        rtlClient.setGainMode(true);
+        rtlClient.setAGC(false);
+        rtlClient.setGain(static_cast<uint32_t>(gainDb * 10));
     };
 
     auto connectTuner = [&]() {
@@ -142,8 +151,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "Connected. Setting frequency to " << freqKHz << " kHz...\n";
                 rtlClient.setFrequency(requestedFrequencyHz.load());
                 rtlClient.setSampleRate(INPUT_RATE);
-                std::cout << "Applying AGC mode " << requestedAGCMode.load()
-                          << " and gain " << requestedGainDb.load() << " dB...\n";
+                std::cout << "Applying TEF AGC mode " << requestedAGCMode.load()
+                          << " and custom gain flags G" << requestedCustomGain.load() << "...\n";
                 rtlConnected = true;
                 applyRtlGainAndAgc();
             } else {
@@ -166,7 +175,13 @@ int main(int argc, char* argv[]) {
     bool appliedForceMono = requestedForceMono.load();
     float rfLevelFiltered = 0.0f;
     bool rfLevelInitialized = false;
-    stereo.setDeemphasis(appliedDeemphasis == 1 ? 50 : 75);
+    if (appliedDeemphasis == 0) {
+        stereo.setDeemphasis(50);
+    } else if (appliedDeemphasis == 1) {
+        stereo.setDeemphasis(75);
+    } else {
+        stereo.setDeemphasis(0);
+    }
     stereo.setForceMono(appliedForceMono);
 
     AudioOutput audioOut;
@@ -196,11 +211,13 @@ int main(int argc, char* argv[]) {
         requestedVolume = std::clamp(volume, 0, 100);
     });
     xdrServer.setGainCallback([&](int newGain) {
-        requestedGainDb = std::clamp(newGain, 0, 99);
+        const int rf = ((newGain / 10) % 10) ? 1 : 0;
+        const int ifv = (newGain % 10) ? 1 : 0;
+        requestedCustomGain = rf * 10 + ifv;
         pendingGain = true;
     });
     xdrServer.setAGCCallback([&](int agcMode) {
-        requestedAGCMode = std::clamp(agcMode, 0, 2);
+        requestedAGCMode = std::clamp(agcMode, 0, 3);
         pendingAGC = true;
     });
     xdrServer.setModeCallback([&](int mode) {
@@ -209,7 +226,7 @@ int main(int argc, char* argv[]) {
         }
     });
     xdrServer.setDeemphasisCallback([&](int deemphasis) {
-        requestedDeemphasis = std::clamp(deemphasis, 0, 1);
+        requestedDeemphasis = std::clamp(deemphasis, 0, 2);
     });
     xdrServer.setForceMonoCallback([&](bool forceMono) {
         requestedForceMono = forceMono;
@@ -255,7 +272,13 @@ int main(int argc, char* argv[]) {
 
         int targetDeemphasis = requestedDeemphasis.load();
         if (targetDeemphasis != appliedDeemphasis) {
-            stereo.setDeemphasis(targetDeemphasis == 1 ? 50 : 75);
+            if (targetDeemphasis == 0) {
+                stereo.setDeemphasis(50);
+            } else if (targetDeemphasis == 1) {
+                stereo.setDeemphasis(75);
+            } else {
+                stereo.setDeemphasis(0);
+            }
             appliedDeemphasis = targetDeemphasis;
         }
 

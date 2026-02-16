@@ -81,7 +81,6 @@ private:
     std::string generateSalt();
     std::string computeSHA1(const std::string& salt, const std::string& password);
     bool authenticate(const std::string& salt, const std::string& passwordHash);
-    std::string buildLegacyStatus() const;
     std::string buildXdrStateSnapshot() const;
     std::string buildSignalLine() const;
 
