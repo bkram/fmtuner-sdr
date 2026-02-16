@@ -35,6 +35,7 @@ public:
     bool start();
     void stop();
     void updateSignal(float level, bool stereo, bool forcedMono, int cci = -1, int aci = -1);
+    void updatePilot(int pilotTenthsKHz);
 
     void setFrequencyCallback(FrequencyCallback cb);
     void setVolumeCallback(VolumeCallback cb);
@@ -114,6 +115,7 @@ private:
     std::atomic<bool> m_signalForcedMono;
     std::atomic<int> m_cci;
     std::atomic<int> m_aci;
+    std::atomic<int> m_pilotTenthsKHz;
 
     IntCallback m_modeCallback;
     FrequencyCallback m_freqCallback;

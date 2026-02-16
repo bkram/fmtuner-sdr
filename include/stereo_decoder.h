@@ -15,6 +15,7 @@ public:
     void reset();
     void setForceStereo(bool force);
     void setForceMono(bool force);
+    int getPilotLevelTenthsKHz() const { return m_pilotLevelTenthsKHz; }
 
     bool isStereo() const { return m_stereoDetected; }
     void setStereo(bool stereo) { m_forceStereo = stereo; }
@@ -27,6 +28,8 @@ private:
     bool m_stereoDetected;
     bool m_forceStereo;
     bool m_forceMono;
+    float m_pilotMagnitude;
+    int m_pilotLevelTenthsKHz;
 
     float m_pilotPhase;
     float m_pilotFreq;

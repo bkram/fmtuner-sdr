@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cerrno>
 #include <iomanip>
+#include <cmath>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
 #include <random>
@@ -126,7 +127,8 @@ XDRServer::XDRServer(uint16_t port)
     , m_signalStereo(false)
     , m_signalForcedMono(false)
     , m_cci(-1)
-    , m_aci(-1) {
+    , m_aci(-1)
+    , m_pilotTenthsKHz(0) {
 }
 
 XDRServer::~XDRServer() {
@@ -246,6 +248,10 @@ void XDRServer::updateSignal(float level, bool stereo, bool forcedMono, int cci,
     m_signalForcedMono = forcedMono;
     m_cci = cci;
     m_aci = aci;
+}
+
+void XDRServer::updatePilot(int pilotTenthsKHz) {
+    m_pilotTenthsKHz = std::clamp(pilotTenthsKHz, 0, 750);
 }
 
 bool XDRServer::start() {
@@ -737,7 +743,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
         }
 
         case 'N':
-            return "N0";
+            return "N" + std::to_string(m_pilotTenthsKHz.load());
 
         case 'o':
             return m_guestSession ? "o0,1" : "o1,0";

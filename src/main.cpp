@@ -291,6 +291,7 @@ int main(int argc, char* argv[]) {
         demod.processNoDownsample(reinterpret_cast<int8_t*>(iqBuffer), monoBuffer, samples);
         stereo.process(monoBuffer, left, right, samples);
         xdrServer.updateSignal(rfLevelFiltered, stereo.isStereo(), requestedForceMono.load(), -1, -1);
+        xdrServer.updatePilot(stereo.getPilotLevelTenthsKHz());
 
         size_t outSamples = 0;
         for (size_t i = 0; i + DECIMATE <= samples; i += DECIMATE) {

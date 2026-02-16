@@ -8,6 +8,8 @@ StereoDecoder::StereoDecoder(int sampleRate)
     , m_stereoDetected(false)
     , m_forceStereo(false)
     , m_forceMono(false)
+    , m_pilotMagnitude(0.0f)
+    , m_pilotLevelTenthsKHz(0)
     , m_pilotPhase(0)
     , m_pilotFreq(2.0f * 3.14159f * 19000.0f / sampleRate)
     , m_pilotAlpha(0.01f)
@@ -26,6 +28,8 @@ void StereoDecoder::reset() {
     m_pilotFreq = 2.0f * 3.14159f * 19000.0f / m_sampleRate;
     m_pilotCount = 0;
     m_stereoDetected = false;
+    m_pilotMagnitude = 0.0f;
+    m_pilotLevelTenthsKHz = 0;
     m_delayIndex = 0;
     memset(m_audioDelay, 0, sizeof(m_audioDelay));
 }
@@ -44,12 +48,16 @@ bool StereoDecoder::detectPilotPLL(const float* audio, size_t len) {
     }
 
     float errorSum = 0;
+    float iAcc = 0.0f;
+    float qAcc = 0.0f;
     int count = std::min(len, (size_t)2048);
 
     for (int i = 0; i < count; i++) {
         float pilotI = cosf(m_pilotPhase);
         float pilotQ = sinf(m_pilotPhase);
 
+        iAcc += audio[i] * pilotI;
+        qAcc += audio[i] * pilotQ;
         errorSum += audio[i] * pilotQ;
 
         m_pilotPhase += m_pilotFreq + m_pilotBeta * errorSum;
@@ -62,10 +70,16 @@ bool StereoDecoder::detectPilotPLL(const float* audio, size_t len) {
         }
     }
 
-    float pilotMagnitude = errorSum / count;
+    float pilotMagnitude = (2.0f * std::sqrt(iAcc * iAcc + qAcc * qAcc)) / std::max(1, count);
+    m_pilotMagnitude = m_pilotMagnitude * 0.85f + pilotMagnitude * 0.15f;
+
+    // Heuristic scale to 0.1 kHz units for xdr-gtk "N" message.
+    const float calibrated = m_pilotMagnitude * 8.0f;
+    m_pilotLevelTenthsKHz = std::clamp(static_cast<int>(std::round(calibrated * 750.0f)), 0, 750);
+
     float threshold = 0.001f;
 
-    return pilotMagnitude > threshold;
+    return m_pilotMagnitude > threshold;
 }
 
 void StereoDecoder::decodeStereo(const float* mono, float* left, float* right, size_t len) {
@@ -92,6 +106,8 @@ void StereoDecoder::decodeStereo(const float* mono, float* left, float* right, s
 }
 
 void StereoDecoder::process(const float* mono, float* left, float* right, size_t numSamples) {
+    bool pilotPresent = detectPilotPLL(mono, numSamples);
+
     if (m_forceMono) {
         for (size_t i = 0; i < numSamples; i++) {
             left[i] = mono[i];
@@ -101,7 +117,7 @@ void StereoDecoder::process(const float* mono, float* left, float* right, size_t
     }
 
     if (!m_forceStereo && !m_stereoDetected) {
-        if (detectPilotPLL(mono, numSamples)) {
+        if (pilotPresent) {
             m_pilotCount++;
             if (m_pilotCount > 5) {
                 m_stereoDetected = true;
