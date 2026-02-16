@@ -5,41 +5,66 @@
 #include <stdint.h>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 class StereoDecoder {
 public:
-    StereoDecoder(int sampleRate);
+    StereoDecoder(int inputRate, int outputRate);
     ~StereoDecoder();
 
-    void process(const float* mono, float* left, float* right, size_t numSamples);
+    size_t processAudio(const float* mono, float* left, float* right, size_t numSamples);
     void reset();
     void setForceStereo(bool force);
     void setForceMono(bool force);
+    void setDeemphasis(int tau_us);
     int getPilotLevelTenthsKHz() const { return m_pilotLevelTenthsKHz; }
 
     bool isStereo() const { return m_stereoDetected; }
-    void setStereo(bool stereo) { m_forceStereo = stereo; }
 
 private:
-    bool detectPilotPLL(const float* audio, size_t len);
-    void decodeStereo(const float* mono, float* left, float* right, size_t len);
+    float filterSample(float input, const std::vector<float>& taps, std::vector<float>& history, size_t& pos);
+    std::vector<float> designLowPass(double cutoffHz, double transitionHz) const;
+    std::vector<float> designBandPass(double lowHz, double highHz, double transitionHz) const;
+    float windowNuttall(int n, int count) const;
 
-    int m_sampleRate;
+    int m_inputRate;
+    int m_outputRate;
+    int m_downsampleFactor;
     bool m_stereoDetected;
     bool m_forceStereo;
     bool m_forceMono;
     float m_pilotMagnitude;
     int m_pilotLevelTenthsKHz;
+    float m_pilotI;
+    float m_pilotQ;
 
-    float m_pilotPhase;
-    float m_pilotFreq;
-    float m_pilotAlpha;
-    float m_pilotBeta;
+    float m_pllPhase;
+    float m_pllFreq;
+    float m_pllMinFreq;
+    float m_pllMaxFreq;
+    float m_pllAlpha;
+    float m_pllBeta;
     int m_pilotCount;
+    int m_pilotLossCount;
 
-    float m_audioDelay[512];
-    int m_delayIndex;
-    int m_delayLen;
+    std::vector<float> m_pilotTaps;
+    std::vector<float> m_pilotHistory;
+    size_t m_pilotHistPos;
+
+    std::vector<float> m_audioTaps;
+    std::vector<float> m_leftHistory;
+    std::vector<float> m_rightHistory;
+    size_t m_leftHistPos;
+    size_t m_rightHistPos;
+
+    std::vector<float> m_delayLine;
+    size_t m_delayPos;
+    int m_delaySamples;
+
+    int m_decimPhase;
+    float m_deemphAlpha;
+    float m_deemphStateLeft;
+    float m_deemphStateRight;
 };
 
 #endif

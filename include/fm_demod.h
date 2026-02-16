@@ -3,40 +3,40 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <vector>
 
 class FMDemod {
 public:
     FMDemod(int inputRate, int outputRate);
     ~FMDemod();
 
-    void process(const int8_t* iq, float* audio, size_t numSamples);
-    void processNoDownsample(const int8_t* iq, float* audio, size_t numSamples);
+    void process(const uint8_t* iq, float* audio, size_t numSamples);
+    void processNoDownsample(const uint8_t* iq, float* audio, size_t numSamples);
+    size_t downsampleAudio(const float* demod, float* audio, size_t numSamples);
     void reset();
 
     void setDeemphasis(int tau_us);
-    void setOversample(int os);
     void setDeviation(double deviation);
 
 private:
-    void lowPass(float* buffer, size_t len, float cutoff);
-    void downsample(const float* input, float* output, size_t inputLen, size_t* outputLen);
-    void demodulate(const float* iq, float* audio, size_t len);
-    void deemphasize(float* audio, size_t len);
+    void demodulate(const uint8_t* iq, float* audio, size_t len);
+    void initAudioFilter();
 
     int m_inputRate;
     int m_outputRate;
     int m_downsampleFactor;
-    int m_oversample;
-
-    float* m_firBuffer;
-    size_t m_firLen;
 
     float m_lastPhase;
     double m_deviation;
     double m_invDeviation;
 
-    int m_deemphA;
+    float m_deemphAlpha;
     float m_deemphasisState;
+
+    std::vector<float> m_audioTaps;
+    std::vector<float> m_audioHistory;
+    size_t m_audioHistPos;
+    int m_decimPhase;
 };
 
 #endif

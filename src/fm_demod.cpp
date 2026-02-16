@@ -6,30 +6,29 @@
 FMDemod::FMDemod(int inputRate, int outputRate)
     : m_inputRate(inputRate)
     , m_outputRate(outputRate)
-    , m_downsampleFactor(inputRate / outputRate)
-    , m_oversample(1)
-    , m_firBuffer(nullptr)
-    , m_firLen(0)
+    , m_downsampleFactor(std::max(1, inputRate / outputRate))
     , m_lastPhase(0)
     , m_deviation(75000.0)
     , m_invDeviation(0.0)
-    , m_deemphA(0)
-    , m_deemphasisState(0) {
-
+    , m_deemphAlpha(1.0f)
+    , m_deemphasisState(0.0f)
+    , m_audioHistPos(0)
+    , m_decimPhase(0) {
+    initAudioFilter();
     setDeviation(75000.0);
     setDeemphasis(75);
 }
 
-FMDemod::~FMDemod() {
-    delete[] m_firBuffer;
-}
+FMDemod::~FMDemod() = default;
 
 void FMDemod::setDeemphasis(int tau_us) {
-    m_deemphA = (int)std::round(1.0 / (1.0 - std::exp(-1.0 / (m_outputRate * tau_us * 1e-6))));
-}
-
-void FMDemod::setOversample(int os) {
-    m_oversample = os;
+    if (tau_us <= 0) {
+        m_deemphAlpha = 1.0f;
+        return;
+    }
+    const float tau = static_cast<float>(tau_us) * 1e-6f;
+    const float dt = 1.0f / static_cast<float>(m_outputRate);
+    m_deemphAlpha = dt / (tau + dt);
 }
 
 void FMDemod::setDeviation(double deviation) {
@@ -38,28 +37,67 @@ void FMDemod::setDeviation(double deviation) {
 }
 
 void FMDemod::reset() {
-    m_lastPhase = 0;
-    m_deemphasisState = 0;
-    if (m_firBuffer) {
-        memset(m_firBuffer, 0, m_firLen * sizeof(float));
-    }
+    m_lastPhase = 0.0f;
+    m_deemphasisState = 0.0f;
+    m_audioHistPos = 0;
+    m_decimPhase = 0;
+    std::fill(m_audioHistory.begin(), m_audioHistory.end(), 0.0f);
 }
 
-void FMDemod::downsample(const float* input, float* output, size_t inputLen, size_t* outputLen) {
-    size_t outLen = inputLen / m_downsampleFactor;
-    *outputLen = outLen;
-
-    for (size_t i = 0; i < outLen; i++) {
-        output[i] = input[i * m_downsampleFactor];
+void FMDemod::initAudioFilter() {
+    // Match SDR++ intent: post-demod low-pass around 15 kHz before AF resampling.
+    constexpr double cutoffHz = 15000.0;
+    constexpr double transitionHz = 4000.0;
+    int tapCount = static_cast<int>(std::ceil(3.8 * static_cast<double>(m_inputRate) / transitionHz));
+    tapCount = std::clamp(tapCount, 63, 1023);
+    if ((tapCount % 2) == 0) {
+        tapCount++;
     }
+
+    m_audioTaps.assign(static_cast<size_t>(tapCount), 0.0f);
+    const int mid = tapCount / 2;
+    const double omega = 2.0 * M_PI * cutoffHz / static_cast<double>(m_inputRate);
+    double sum = 0.0;
+    for (int n = 0; n < tapCount; n++) {
+        const int m = n - mid;
+        double sinc = 0.0;
+        if (m == 0) {
+            sinc = omega / M_PI;
+        } else {
+            sinc = std::sin(omega * static_cast<double>(m)) / (M_PI * static_cast<double>(m));
+        }
+
+        // Nuttall window (same family used by SDR++ tap generation).
+        const double x = 2.0 * M_PI * static_cast<double>(n) / static_cast<double>(tapCount - 1);
+        const double window = 0.355768
+                            - 0.487396 * std::cos(x)
+                            + 0.144232 * std::cos(2.0 * x)
+                            - 0.012604 * std::cos(3.0 * x);
+
+        const double h = sinc * window;
+        m_audioTaps[static_cast<size_t>(n)] = static_cast<float>(h);
+        sum += h;
+    }
+
+    if (std::abs(sum) > 1e-12) {
+        const float invSum = static_cast<float>(1.0 / sum);
+        for (float& tap : m_audioTaps) {
+            tap *= invSum;
+        }
+    }
+
+    m_audioHistory.assign(m_audioTaps.size(), 0.0f);
+    m_audioHistPos = 0;
+    m_decimPhase = 0;
 }
 
-void FMDemod::demodulate(const float* iq, float* audio, size_t len) {
+void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
     for (size_t i = 0; i < len; i++) {
-        float i_val = iq[i * 2];
-        float q_val = iq[i * 2 + 1];
+        // rtl_tcp provides unsigned 8-bit IQ centered at 127.5.
+        const float i_val = (static_cast<float>(iq[i * 2]) - 127.5f) / 127.5f;
+        const float q_val = (static_cast<float>(iq[i * 2 + 1]) - 127.5f) / 127.5f;
 
-        float phase = std::atan2(q_val, i_val);
+        const float phase = std::atan2(q_val, i_val);
         float delta = phase - m_lastPhase;
 
         while (delta > M_PI) delta -= 2.0f * M_PI;
@@ -70,53 +108,45 @@ void FMDemod::demodulate(const float* iq, float* audio, size_t len) {
     }
 }
 
-void FMDemod::deemphasize(float* audio, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        int d = (int)(audio[i] * 32767.0f - m_deemphasisState);
-        if (d > 0) {
-            m_deemphasisState += (d + m_deemphA / 2) / m_deemphA;
-        } else {
-            m_deemphasisState += (d - m_deemphA / 2) / m_deemphA;
-        }
-        audio[i] = m_deemphasisState / 32767.0f;
-    }
-}
-
-void FMDemod::process(const int8_t* iq, float* audio, size_t numSamples) {
-    float* floatBuf = new float[numSamples * 2];
-    float* demodulated = new float[numSamples];
-
-    for (size_t i = 0; i < numSamples * 2; i++) {
-        floatBuf[i] = iq[i] / 128.0f;
+size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamples) {
+    if (m_audioTaps.empty() || m_audioHistory.empty()) {
+        return 0;
     }
 
-    demodulate(floatBuf, demodulated, numSamples);
-
-    deemphasize(demodulated, numSamples);
-
-    size_t downLen = 0;
-    downsample(demodulated, audio, numSamples, &downLen);
-
-    delete[] floatBuf;
-    delete[] demodulated;
-}
-
-void FMDemod::processNoDownsample(const int8_t* iq, float* audio, size_t numSamples) {
-    float* floatBuf = new float[numSamples * 2];
-    float* demodulated = new float[numSamples];
-
-    for (size_t i = 0; i < numSamples * 2; i++) {
-        floatBuf[i] = iq[i] / 128.0f;
-    }
-
-    demodulate(floatBuf, demodulated, numSamples);
-
-    deemphasize(demodulated, numSamples);
+    const size_t tapCount = m_audioTaps.size();
+    size_t outCount = 0;
 
     for (size_t i = 0; i < numSamples; i++) {
-        audio[i] = demodulated[i];
+        m_audioHistory[m_audioHistPos] = demod[i];
+        m_audioHistPos = (m_audioHistPos + 1) % tapCount;
+
+        m_decimPhase++;
+        if (m_decimPhase < m_downsampleFactor) {
+            continue;
+        }
+        m_decimPhase = 0;
+
+        float sample = 0.0f;
+        size_t histIndex = m_audioHistPos;
+        for (size_t t = 0; t < tapCount; t++) {
+            histIndex = (histIndex == 0) ? (tapCount - 1) : (histIndex - 1);
+            sample += m_audioTaps[t] * m_audioHistory[histIndex];
+        }
+
+        // SDR++ applies deemphasis in post-processing after AF resampling.
+        m_deemphasisState = (m_deemphAlpha * sample) + ((1.0f - m_deemphAlpha) * m_deemphasisState);
+        audio[outCount++] = m_deemphasisState;
     }
 
-    delete[] floatBuf;
-    delete[] demodulated;
+    return outCount;
+}
+
+void FMDemod::process(const uint8_t* iq, float* audio, size_t numSamples) {
+    std::vector<float> demodulated(numSamples);
+    demodulate(iq, demodulated.data(), numSamples);
+    downsampleAudio(demodulated.data(), audio, numSamples);
+}
+
+void FMDemod::processNoDownsample(const uint8_t* iq, float* audio, size_t numSamples) {
+    demodulate(iq, audio, numSamples);
 }

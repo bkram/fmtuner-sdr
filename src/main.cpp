@@ -32,6 +32,9 @@ void printUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+    constexpr int INPUT_RATE = 256000;
+    constexpr int OUTPUT_RATE = 32000;
+
     std::string tcpHost = "localhost";
     uint16_t tcpPort = 1234;
     uint32_t freqKHz = 88600;
@@ -124,9 +127,12 @@ int main(int argc, char* argv[]) {
         rtlClient.setGainMode(manualGain);
         rtlClient.setAGC(!manualGain);
 
-        // rtl_tcp gain command uses 0.1 dB steps.
-        const uint32_t gainTenthsDb = static_cast<uint32_t>(std::max(0, requestedGainDb.load()) * 10);
-        rtlClient.setGain(gainTenthsDb);
+        if (manualGain) {
+            // rtl_tcp gain command uses 0.1 dB steps; RTL-SDR practical max is ~49.6 dB.
+            const int gainDb = std::clamp(requestedGainDb.load(), 0, 49);
+            const uint32_t gainTenthsDb = static_cast<uint32_t>(gainDb * 10);
+            rtlClient.setGain(gainTenthsDb);
+        }
     };
 
     auto connectTuner = [&]() {
@@ -135,7 +141,7 @@ int main(int argc, char* argv[]) {
             if (rtlClient.connect()) {
                 std::cout << "Connected. Setting frequency to " << freqKHz << " kHz...\n";
                 rtlClient.setFrequency(requestedFrequencyHz.load());
-                rtlClient.setSampleRate(1024000);
+                rtlClient.setSampleRate(INPUT_RATE);
                 std::cout << "Applying AGC mode " << requestedAGCMode.load()
                           << " and gain " << requestedGainDb.load() << " dB...\n";
                 rtlConnected = true;
@@ -154,16 +160,13 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    constexpr int INPUT_RATE = 1024000;
-    constexpr int OUTPUT_RATE = 32000;
-
     FMDemod demod(INPUT_RATE, OUTPUT_RATE);
-    StereoDecoder stereo(OUTPUT_RATE);
+    StereoDecoder stereo(INPUT_RATE, OUTPUT_RATE);
     int appliedDeemphasis = requestedDeemphasis.load();
     bool appliedForceMono = requestedForceMono.load();
     float rfLevelFiltered = 0.0f;
     bool rfLevelInitialized = false;
-    demod.setDeemphasis(appliedDeemphasis == 1 ? 50 : 75);
+    stereo.setDeemphasis(appliedDeemphasis == 1 ? 50 : 75);
     stereo.setForceMono(appliedForceMono);
 
     AudioOutput audioOut;
@@ -230,13 +233,10 @@ int main(int argc, char* argv[]) {
     std::cout << "Press Ctrl+C to stop.\n";
 
     const size_t BUF_SAMPLES = 8192;
-    const size_t DECIMATE = 32;
     uint8_t* iqBuffer = new uint8_t[BUF_SAMPLES * 2];
-    float* monoBuffer = new float[BUF_SAMPLES];
-    float* left = new float[BUF_SAMPLES];
-    float* right = new float[BUF_SAMPLES];
-    float* downsampledLeft = new float[BUF_SAMPLES / DECIMATE];
-    float* downsampledRight = new float[BUF_SAMPLES / DECIMATE];
+    float* demodBuffer = new float[BUF_SAMPLES];
+    float* audioLeft = new float[BUF_SAMPLES];
+    float* audioRight = new float[BUF_SAMPLES];
 
     while (g_running) {
         if (!tunerActive) {
@@ -255,7 +255,7 @@ int main(int argc, char* argv[]) {
 
         int targetDeemphasis = requestedDeemphasis.load();
         if (targetDeemphasis != appliedDeemphasis) {
-            demod.setDeemphasis(targetDeemphasis == 1 ? 50 : 75);
+            stereo.setDeemphasis(targetDeemphasis == 1 ? 50 : 75);
             appliedDeemphasis = targetDeemphasis;
         }
 
@@ -288,33 +288,27 @@ int main(int argc, char* argv[]) {
             rfLevelFiltered = rfLevelFiltered * 0.85f + rfLevel * 0.15f;
         }
 
-        demod.processNoDownsample(reinterpret_cast<int8_t*>(iqBuffer), monoBuffer, samples);
-        stereo.process(monoBuffer, left, right, samples);
+        demod.processNoDownsample(iqBuffer, demodBuffer, samples);
+        const size_t outSamples = stereo.processAudio(demodBuffer, audioLeft, audioRight, samples);
         xdrServer.updateSignal(rfLevelFiltered, stereo.isStereo(), requestedForceMono.load(), -1, -1);
         xdrServer.updatePilot(stereo.getPilotLevelTenthsKHz());
 
-        size_t outSamples = 0;
-        for (size_t i = 0; i + DECIMATE <= samples; i += DECIMATE) {
-            float sumL = 0, sumR = 0;
-            for (size_t j = 0; j < DECIMATE; j++) {
-                sumL += left[i + j];
-                sumR += right[i + j];
-            }
-            float volumeScale = requestedVolume.load() / 100.0f;
-            downsampledLeft[outSamples] = (sumL / DECIMATE) * volumeScale;
-            downsampledRight[outSamples] = (sumR / DECIMATE) * volumeScale;
-            outSamples++;
+        // Keep small headroom to reduce hard clipping distortion at high modulation.
+        const float volumeScale = (requestedVolume.load() / 100.0f) * 0.85f;
+        for (size_t i = 0; i < outSamples; i++) {
+            audioLeft[i] = std::clamp(audioLeft[i] * volumeScale, -1.0f, 1.0f);
+            audioRight[i] = std::clamp(audioRight[i] * volumeScale, -1.0f, 1.0f);
         }
 
-        audioOut.write(downsampledLeft, downsampledRight, outSamples);
+        if (outSamples > 0) {
+            audioOut.write(audioLeft, audioRight, outSamples);
+        }
     }
 
     delete[] iqBuffer;
-    delete[] monoBuffer;
-    delete[] left;
-    delete[] right;
-    delete[] downsampledLeft;
-    delete[] downsampledRight;
+    delete[] demodBuffer;
+    delete[] audioLeft;
+    delete[] audioRight;
 
     audioOut.shutdown();
     xdrServer.stop();
