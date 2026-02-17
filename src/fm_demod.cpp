@@ -12,42 +12,37 @@
 #endif
 
 namespace {
-inline size_t prevCircular(size_t idx, size_t size) {
-    return (idx == 0) ? (size - 1) : (idx - 1);
+const std::array<float, 256>& iqNormLut() {
+    static const std::array<float, 256> lut = []() {
+        std::array<float, 256> out{};
+        for (int v = 0; v < 256; v++) {
+            out[static_cast<size_t>(v)] = (static_cast<float>(v) - 127.5f) / 127.5f;
+        }
+        return out;
+    }();
+    return lut;
 }
 
-float firCircularScalar(const std::vector<float>& taps,
-                        const std::vector<float>& history,
-                        size_t newestIndex) {
-    const size_t tapCount = taps.size();
+float firLinearScalar(const float* tapsRev,
+                      const float* historyLinear,
+                      size_t tapCount) {
     float sample = 0.0f;
-    size_t histIndex = newestIndex;
     for (size_t t = 0; t < tapCount; t++) {
-        sample += taps[t] * history[histIndex];
-        histIndex = prevCircular(histIndex, tapCount);
+        sample += tapsRev[t] * historyLinear[t];
     }
     return sample;
 }
 
 #if defined(__AVX2__) && defined(__FMA__)
-float firCircularAvx2Fma(const std::vector<float>& taps,
-                         const std::vector<float>& history,
-                         size_t newestIndex) {
-    const size_t tapCount = taps.size();
+float firLinearAvx2Fma(const float* tapsRev,
+                       const float* historyLinear,
+                       size_t tapCount) {
     __m256 acc = _mm256_setzero_ps();
-    size_t histIndex = newestIndex;
     size_t t = 0;
 
     for (; t + 8 <= tapCount; t += 8) {
-        alignas(32) int idxArr[8];
-        for (int lane = 0; lane < 8; lane++) {
-            idxArr[lane] = static_cast<int>(histIndex);
-            histIndex = prevCircular(histIndex, tapCount);
-        }
-
-        const __m256 tapVec = _mm256_loadu_ps(&taps[t]);
-        const __m256i idxVec = _mm256_load_si256(reinterpret_cast<const __m256i*>(idxArr));
-        const __m256 histVec = _mm256_i32gather_ps(history.data(), idxVec, 4);
+        const __m256 tapVec = _mm256_loadu_ps(tapsRev + t);
+        const __m256 histVec = _mm256_loadu_ps(historyLinear + t);
         acc = _mm256_fmadd_ps(tapVec, histVec, acc);
     }
 
@@ -57,31 +52,22 @@ float firCircularAvx2Fma(const std::vector<float>& taps,
               + sumArr[4] + sumArr[5] + sumArr[6] + sumArr[7];
 
     for (; t < tapCount; t++) {
-        sum += taps[t] * history[histIndex];
-        histIndex = prevCircular(histIndex, tapCount);
+        sum += tapsRev[t] * historyLinear[t];
     }
     return sum;
 }
 #endif
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
-float firCircularNeon(const std::vector<float>& taps,
-                      const std::vector<float>& history,
-                      size_t newestIndex) {
-    const size_t tapCount = taps.size();
+float firLinearNeon(const float* tapsRev,
+                    const float* historyLinear,
+                    size_t tapCount) {
     float32x4_t acc = vdupq_n_f32(0.0f);
-    size_t histIndex = newestIndex;
     size_t t = 0;
 
     for (; t + 4 <= tapCount; t += 4) {
-        float histArr[4];
-        for (int lane = 0; lane < 4; lane++) {
-            histArr[lane] = history[histIndex];
-            histIndex = prevCircular(histIndex, tapCount);
-        }
-
-        const float32x4_t tapVec = vld1q_f32(&taps[t]);
-        const float32x4_t histVec = vld1q_f32(histArr);
+        const float32x4_t tapVec = vld1q_f32(tapsRev + t);
+        const float32x4_t histVec = vld1q_f32(historyLinear + t);
 #if defined(__aarch64__)
         acc = vfmaq_f32(acc, tapVec, histVec);
 #else
@@ -98,8 +84,7 @@ float firCircularNeon(const std::vector<float>& taps,
     sum = tmp[0] + tmp[1] + tmp[2] + tmp[3];
 #endif
     for (; t < tapCount; t++) {
-        sum += taps[t] * history[histIndex];
-        histIndex = prevCircular(histIndex, tapCount);
+        sum += tapsRev[t] * historyLinear[t];
     }
     return sum;
 }
@@ -145,7 +130,7 @@ void FMDemod::reset() {
     m_deemphasisState = 0.0f;
     m_audioHistPos = 0;
     m_decimPhase = 0;
-    std::fill(m_audioHistory.begin(), m_audioHistory.end(), 0.0f);
+    std::fill(m_audioHistoryLinear.begin(), m_audioHistoryLinear.end(), 0.0f);
 }
 
 void FMDemod::initAudioFilter() {
@@ -194,7 +179,9 @@ void FMDemod::rebuildAudioFilter(double cutoffHz) {
         }
     }
 
-    m_audioHistory.assign(m_audioTaps.size(), 0.0f);
+    m_audioTapsRev.resize(m_audioTaps.size());
+    std::reverse_copy(m_audioTaps.begin(), m_audioTaps.end(), m_audioTapsRev.begin());
+    m_audioHistoryLinear.assign(m_audioTaps.size() * 2, 0.0f);
     m_audioHistPos = 0;
     m_decimPhase = 0;
 }
@@ -244,15 +231,18 @@ void FMDemod::setBandwidthHz(int bwHz) {
 void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
     constexpr float kPi = 3.14159265358979323846f;
     constexpr float kTwoPi = 6.28318530717958647692f;
+    const auto& kIqNorm = iqNormLut();
+    float lastPhase = m_lastPhase;
+    const uint8_t* iqPtr = iq;
 
     for (size_t i = 0; i < len; i++) {
         // rtl_tcp provides unsigned 8-bit IQ centered at 127.5.
-        const size_t iqIndex = i * 2;
-        const float i_val = (static_cast<float>(iq[iqIndex]) - 127.5f) / 127.5f;
-        const float q_val = (static_cast<float>(iq[iqIndex + 1]) - 127.5f) / 127.5f;
+        const float i_val = kIqNorm[iqPtr[0]];
+        const float q_val = kIqNorm[iqPtr[1]];
+        iqPtr += 2;
 
         const float phase = std::atan2f(q_val, i_val);
-        float delta = phase - m_lastPhase;
+        float delta = phase - lastPhase;
 
         if (delta > kPi) {
             delta -= kTwoPi;
@@ -261,12 +251,14 @@ void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
         }
 
         audio[i] = delta * m_invDeviation;
-        m_lastPhase = phase;
+        lastPhase = phase;
     }
+
+    m_lastPhase = lastPhase;
 }
 
 size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamples) {
-    if (m_audioTaps.empty() || m_audioHistory.empty()) {
+    if (m_audioTaps.empty() || m_audioTapsRev.empty() || m_audioHistoryLinear.empty()) {
         return 0;
     }
 
@@ -274,8 +266,12 @@ size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamp
     size_t outCount = 0;
 
     for (size_t i = 0; i < numSamples; i++) {
-        m_audioHistory[m_audioHistPos] = demod[i];
-        m_audioHistPos = (m_audioHistPos + 1) % tapCount;
+        m_audioHistoryLinear[m_audioHistPos] = demod[i];
+        m_audioHistoryLinear[m_audioHistPos + tapCount] = demod[i];
+        m_audioHistPos++;
+        if (m_audioHistPos >= tapCount) {
+            m_audioHistPos = 0;
+        }
 
         m_decimPhase++;
         if (m_decimPhase < m_downsampleFactor) {
@@ -283,12 +279,14 @@ size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamp
         }
         m_decimPhase = 0;
 
-        float sample = 0.0f;
-        size_t histIndex = m_audioHistPos;
-        for (size_t t = 0; t < tapCount; t++) {
-            histIndex = (histIndex == 0) ? (tapCount - 1) : (histIndex - 1);
-            sample += m_audioTaps[t] * m_audioHistory[histIndex];
-        }
+        const float* historyWindow = &m_audioHistoryLinear[m_audioHistPos];
+#if defined(__AVX2__) && defined(__FMA__)
+        const float sample = firLinearAvx2Fma(m_audioTapsRev.data(), historyWindow, tapCount);
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+        const float sample = firLinearNeon(m_audioTapsRev.data(), historyWindow, tapCount);
+#else
+        const float sample = firLinearScalar(m_audioTapsRev.data(), historyWindow, tapCount);
+#endif
 
         // SDR++ applies deemphasis in post-processing after AF resampling.
         m_deemphasisState = (m_deemphAlpha * sample) + ((1.0f - m_deemphAlpha) * m_deemphasisState);
@@ -299,13 +297,15 @@ size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamp
 }
 
 void FMDemod::process(const uint8_t* iq, float* audio, size_t numSamples) {
-    std::vector<float> demodulated(numSamples);
-    demodulate(iq, demodulated.data(), numSamples);
-    downsampleAudio(demodulated.data(), audio, numSamples);
+    if (m_demodScratch.size() < numSamples) {
+        m_demodScratch.resize(numSamples);
+    }
+    demodulate(iq, m_demodScratch.data(), numSamples);
+    downsampleAudio(m_demodScratch.data(), audio, numSamples);
 }
 
 void FMDemod::processNoDownsample(const uint8_t* iq, float* audio, size_t numSamples) {
-    if (m_audioTaps.empty() || m_audioHistory.empty()) {
+    if (m_audioTaps.empty() || m_audioTapsRev.empty() || m_audioHistoryLinear.empty()) {
         demodulate(iq, audio, numSamples);
         return;
     }
@@ -317,16 +317,20 @@ void FMDemod::processNoDownsample(const uint8_t* iq, float* audio, size_t numSam
 
     const size_t tapCount = m_audioTaps.size();
     for (size_t i = 0; i < numSamples; i++) {
-        m_audioHistory[m_audioHistPos] = m_demodScratch[i];
-        m_audioHistPos = (m_audioHistPos + 1) % tapCount;
+        m_audioHistoryLinear[m_audioHistPos] = m_demodScratch[i];
+        m_audioHistoryLinear[m_audioHistPos + tapCount] = m_demodScratch[i];
+        m_audioHistPos++;
+        if (m_audioHistPos >= tapCount) {
+            m_audioHistPos = 0;
+        }
 
-        const size_t newestIndex = prevCircular(m_audioHistPos, tapCount);
+        const float* historyWindow = &m_audioHistoryLinear[m_audioHistPos];
 #if defined(__AVX2__) && defined(__FMA__)
-        const float sample = firCircularAvx2Fma(m_audioTaps, m_audioHistory, newestIndex);
+        const float sample = firLinearAvx2Fma(m_audioTapsRev.data(), historyWindow, tapCount);
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-        const float sample = firCircularNeon(m_audioTaps, m_audioHistory, newestIndex);
+        const float sample = firLinearNeon(m_audioTapsRev.data(), historyWindow, tapCount);
 #else
-        const float sample = firCircularScalar(m_audioTaps, m_audioHistory, newestIndex);
+        const float sample = firLinearScalar(m_audioTapsRev.data(), historyWindow, tapCount);
 #endif
         audio[i] = sample;
     }
