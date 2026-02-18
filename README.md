@@ -138,6 +138,66 @@ With XDR password protection:
 ./fm-tuner-sdr -t localhost:1234 -f 101100 -s -P mypassword
 ```
 
+### INI Configuration
+
+Run with:
+```bash
+./fm-tuner-sdr -c fm-tuner-sdr.ini -s
+```
+
+Key sections:
+
+- `[rtl_tcp]`: RTL-TCP host/port.
+- `[sdr]`: SDR hardware-specific settings.
+- `[tuner]`: Station/audio settings (frequency, deemphasis).
+- `[processing]`: DSP/control behavior.
+
+Important SDR/AGC keys:
+
+```ini
+[sdr]
+# -1 = auto/AGC profile path, otherwise fixed manual RTL gain in dB
+rtl_gain_db = -1
+# RF level calibration for 0..90 mapping
+signal_floor_dbfs = -55.0
+signal_ceil_dbfs = -19.0
+
+[processing]
+# 0..3 AGC profile used by this app's RTL mapping
+agc_mode = 2
+
+# If false, remote client A/G commands are ignored
+client_gain_allowed = false
+
+[audio]
+# Underflow fade tail in milliseconds (0..50)
+underflow_fade_ms = 8
+# Optional short-impulse click limiter in main path (can color transients)
+click_suppressor = false
+
+[rds]
+# strict|balanced|loose
+aggressiveness = loose
+# AGC smoothing factors (closer to 1.0 = slower changes)
+agc_attack = 0.992
+agc_release = 0.9996
+# Group debounce thresholds for lock state
+lock_acquire_groups = 2
+lock_loss_groups = 14
+```
+
+`agc_mode` mapping (used when `rtl_gain_db = -1` and IMS/IF auto bit is not set):
+
+- `A0` -> ~44 dB
+- `A1` -> ~36 dB
+- `A2` -> ~30 dB
+- `A3` -> ~24 dB
+
+Notes:
+
+- If `rtl_gain_db >= 0`, fixed manual gain is used and AGC profile selection is bypassed.
+- CLI `-g` also forces manual gain and overrides INI gain behavior.
+
 ## Audio Loopback
 
 To pipe audio to other applications (like FM-DX-Webserver), use a virtual audio cable:
@@ -191,6 +251,52 @@ Then select the loopback device as your audio output in system settings or the t
 pip install pytest numpy
 pytest tests/
 ```
+
+## IQ Analysis Tool
+
+Capture IQ while running:
+
+```bash
+./fm-tuner-sdr -c fm-tuner-sdr.ini -s -i /tmp/capture.iq
+```
+
+Analyze capture:
+
+```bash
+python3 tools/analyze_iq.py /tmp/capture.iq --sample-rate 256000
+```
+
+## Gain Calibration Tool
+
+Calibrate a stable `rtl_gain_db` across multiple FM frequencies:
+
+```bash
+python3 tools/calibrate_gain.py \
+  --freqs 88600,96800,105900,107200 \
+  --gains 0,7,14,20,28,35,42,49 \
+  --seconds 8
+```
+
+Outputs:
+- JSON report with all tested points and scores.
+- `recommended_sdr.ini` snippet with recommended `rtl_gain_db` for normal runs.
+
+Full FM-band reference file (87.5-108.0 MHz, 100 kHz steps):
+
+```bash
+python3 tools/calibrate_gain.py \
+  --full-band \
+  --freq-start-khz 87500 \
+  --freq-end-khz 108000 \
+  --freq-step-khz 100 \
+  --gains 0,7,14,20,28,35,42,49 \
+  --seconds 6
+```
+
+Additional external reference outputs:
+- `gain_reference.csv` (`freq_khz,gain_db,source`)
+- `gain_reference.ini` (`[gain_reference]` mapping)
+- `gain_reference.json` (machine-readable mapping with source)
 
 ## Credits
 

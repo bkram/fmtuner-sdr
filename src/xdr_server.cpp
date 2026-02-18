@@ -111,15 +111,49 @@ std::string formatSampling(int interval, int detector) {
     oss << "I" << interval << "," << detector;
     return oss.str();
 }
+
+uint8_t evaluatePiState(const std::array<uint16_t, 64>& piHistory,
+                        const std::array<uint8_t, 64>& piErrorHistory,
+                        uint8_t fill,
+                        uint16_t value) {
+    uint8_t count = 0;
+    uint8_t correctCount = 0;
+    for (uint8_t i = 0; i < fill; i++) {
+        if (piHistory[i] == value) {
+            count++;
+            if (piErrorHistory[i] == 0) {
+                correctCount++;
+            }
+        }
+    }
+
+    if (correctCount >= 2) return 0;               // correct
+    if (count >= 2 && correctCount > 0) return 1;  // very likely
+    if (count >= 3) return 2;                      // likely
+    if (count == 2 || correctCount > 0) return 3;  // unlikely
+    return 4;                                      // invalid
+}
 }  // namespace
+
+void XDRServer::addClientSocket(int clientSocket) {
+    std::lock_guard<std::mutex> lock(m_clientSocketsMutex);
+    m_clientSockets.push_back(clientSocket);
+}
+
+void XDRServer::removeClientSocket(int clientSocket) {
+    std::lock_guard<std::mutex> lock(m_clientSocketsMutex);
+    auto it = std::find(m_clientSockets.begin(), m_clientSockets.end(), clientSocket);
+    if (it != m_clientSockets.end()) {
+        m_clientSockets.erase(it);
+    }
+}
 
 XDRServer::XDRServer(uint16_t port)
     : m_port(port)
     , m_serverSocket(-1)
     , m_running(false)
+    , m_activeClientThreads(0)
     , m_guestMode(false)
-    , m_authenticated(false)
-    , m_guestSession(false)
     , m_verboseLogging(true)
     , m_mode(0)
     , m_frequency(88500000)
@@ -150,6 +184,10 @@ XDRServer::XDRServer(uint16_t port)
     m_scanContinuous = false;
     m_scanStartPending = false;
     m_scanCancelPending = false;
+    m_piHistFill = 0;
+    m_piHistPos = static_cast<uint8_t>(m_piHistory.size() - 1);
+    m_piHistory.fill(0);
+    m_piErrorHistory.fill(1);
 }
 
 XDRServer::~XDRServer() {
@@ -268,12 +306,39 @@ void XDRServer::updatePilot(int pilotTenthsKHz) {
 void XDRServer::updateRDS(uint16_t blockA, uint16_t blockB, uint16_t blockC, uint16_t blockD, uint8_t errors) {
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "R%04X%04X%04X%04X%02X", blockA, blockB, blockC, blockD, errors);
+    const std::string line(buffer);
 
     std::lock_guard<std::mutex> lock(m_rdsMutex);
-    if (m_rdsQueue.size() >= 64) {
+    const uint8_t blockAErr = static_cast<uint8_t>((errors >> 6) & 0x03u);
+    m_piHistPos = static_cast<uint8_t>((m_piHistPos + 1) % m_piHistory.size());
+    m_piHistory[m_piHistPos] = blockA;
+    m_piErrorHistory[m_piHistPos] = (blockAErr == 0 ? 0 : 1);
+    if (m_piHistFill < m_piHistory.size()) {
+        m_piHistFill++;
+    }
+
+    const uint8_t piState = evaluatePiState(m_piHistory, m_piErrorHistory, m_piHistFill, blockA);
+    constexpr size_t kMaxRdsQueue = 256;
+    if (piState <= 3) {
+        char piBuffer[16];
+        std::snprintf(piBuffer, sizeof(piBuffer), "P%04X%.*s", blockA, static_cast<int>(piState), "???");
+        if (m_rdsQueue.size() >= kMaxRdsQueue) {
+            m_rdsQueue.pop_front();
+        }
+        m_rdsQueue.emplace_back(m_rdsNextSeq++, std::string(piBuffer));
+    }
+
+    if (m_rdsQueue.size() >= kMaxRdsQueue) {
         m_rdsQueue.pop_front();
     }
-    m_rdsQueue.emplace_back(buffer);
+    m_rdsQueue.emplace_back(m_rdsNextSeq++, line);
+}
+
+void XDRServer::setFrequencyState(uint32_t freqHz) {
+    if (freqHz == 0) {
+        return;
+    }
+    m_frequency = freqHz;
 }
 
 bool XDRServer::consumeScanStart(ScanConfig& config) {
@@ -301,7 +366,7 @@ void XDRServer::pushScanLine(const std::string& line) {
     if (m_scanQueue.size() >= 8) {
         m_scanQueue.pop_front();
     }
-    m_scanQueue.emplace_back("U" + line);
+    m_scanQueue.emplace_back(m_scanNextSeq++, "U" + line);
 }
 
 bool XDRServer::start() {
@@ -346,8 +411,17 @@ bool XDRServer::start() {
             int clientSocket = accept(m_serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
 
             if (clientSocket >= 0) {
-                handleClient(clientSocket);
-                close(clientSocket);
+                addClientSocket(clientSocket);
+                m_activeClientThreads.fetch_add(1, std::memory_order_relaxed);
+                std::thread([this, clientSocket]() {
+                    handleClient(clientSocket);
+                    removeClientSocket(clientSocket);
+                    close(clientSocket);
+                    m_activeClientThreads.fetch_sub(1, std::memory_order_relaxed);
+                    m_clientThreadWaitCv.notify_all();
+                }).detach();
+            } else if (m_running && (errno == EINTR)) {
+                continue;
             }
         }
     });
@@ -366,13 +440,28 @@ void XDRServer::stop() {
     m_running = false;
 
     if (m_serverSocket >= 0) {
+        shutdown(m_serverSocket, SHUT_RDWR);
         close(m_serverSocket);
         m_serverSocket = -1;
+    }
+
+    std::vector<int> clients;
+    {
+        std::lock_guard<std::mutex> lock(m_clientSocketsMutex);
+        clients = m_clientSockets;
+    }
+    for (int sock : clients) {
+        shutdown(sock, SHUT_RDWR);
     }
 
     if (m_acceptThread.joinable()) {
         m_acceptThread.join();
     }
+
+    std::unique_lock<std::mutex> lock(m_clientThreadWaitMutex);
+    m_clientThreadWaitCv.wait_for(lock, std::chrono::seconds(2), [&]() {
+        return m_activeClientThreads.load(std::memory_order_relaxed) == 0;
+    });
 }
 
 void XDRServer::handleClient(int clientSocket) {
@@ -418,12 +507,20 @@ void XDRServer::handleClient(int clientSocket) {
 
 void XDRServer::handleFmdxClient(int clientSocket) {
     bool tunerStarted = false;
+    bool disconnectRequested = false;
     char cmdBuffer[256];
     std::string command;
+    setRecvTimeoutMs(clientSocket, 200);
 
-    while (true) {
+    while (m_running && !disconnectRequested) {
         ssize_t n = recv(clientSocket, cmdBuffer, sizeof(cmdBuffer) - 1, 0);
-        if (n <= 0) {
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            break;
+        }
+        if (n == 0) {
             break;
         }
 
@@ -454,12 +551,19 @@ void XDRServer::handleFmdxClient(int clientSocket) {
             } else if (tunerStarted) {
                 std::string response = processFmdxCommand(line);
                 response += "\n";
-                send(clientSocket, response.c_str(), response.length(), 0);
+                if (send(clientSocket, response.c_str(), response.length(), 0) <= 0) {
+                    disconnectRequested = true;
+                    break;
+                }
             } else {
-                send(clientSocket, "ER\n", 3, 0);
+                if (send(clientSocket, "ER\n", 3, 0) <= 0) {
+                    disconnectRequested = true;
+                    break;
+                }
             }
         }
     }
+    setRecvTimeoutMs(clientSocket, 0);
 
     if (tunerStarted && m_stopCallback) {
         m_stopCallback();
@@ -470,8 +574,8 @@ void XDRServer::handleXdrClient(int clientSocket, const char* clientIP) {
     if (m_verboseLogging.load()) {
         std::cout << "XDR client authenticating from " << clientIP << std::endl;
     }
-    m_authenticated = false;
-    m_guestSession = false;
+    bool authenticated = false;
+    bool guestSession = false;
     
     std::string salt = generateSalt();
     
@@ -513,19 +617,29 @@ void XDRServer::handleXdrClient(int clientSocket, const char* clientIP) {
     
     if (!authSuccess && m_guestMode) {
         send(clientSocket, "a1\n", 3, 0);
-        m_guestSession = true;
+        guestSession = true;
     } else {
         send(clientSocket, "a2\n", 3, 0);
-        m_guestSession = false;
+        guestSession = false;
     }
     
-    m_authenticated = authSuccess || m_guestMode;
-    if (m_authenticated) {
+    authenticated = authSuccess || m_guestMode;
+    uint64_t lastRdsSeq = 0;
+    uint64_t lastScanSeq = 0;
+    if (authenticated) {
         {
             std::lock_guard<std::mutex> lock(m_rdsMutex);
-            m_rdsQueue.clear();
+            if (!m_rdsQueue.empty()) {
+                lastRdsSeq = m_rdsQueue.back().first;
+            }
         }
-        std::string online = m_guestSession ? "o0,1\n" : "o1,0\n";
+        {
+            std::lock_guard<std::mutex> lock(m_scanMutex);
+            if (!m_scanQueue.empty()) {
+                lastScanSeq = m_scanQueue.back().first;
+            }
+        }
+        std::string online = guestSession ? "o0,1\n" : "o1,0\n";
         send(clientSocket, online.c_str(), online.length(), 0);
 
         std::string snapshot = buildXdrStateSnapshot();
@@ -538,38 +652,51 @@ void XDRServer::handleXdrClient(int clientSocket, const char* clientIP) {
     setRecvTimeoutMs(clientSocket, 100);
     auto lastSignal = std::chrono::steady_clock::now();
 
-    while (true) {
+    while (m_running) {
         ssize_t n = recv(clientSocket, cmdBuffer, sizeof(cmdBuffer) - 1, 0);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                std::string rdsLine;
+                bool sendFailed = false;
+                std::vector<std::string> rdsLines;
                 {
                     std::lock_guard<std::mutex> lock(m_rdsMutex);
-                    if (!m_rdsQueue.empty()) {
-                        rdsLine = m_rdsQueue.front();
-                        m_rdsQueue.pop_front();
+                    for (const auto& entry : m_rdsQueue) {
+                        if (entry.first > lastRdsSeq) {
+                            rdsLines.push_back(entry.second);
+                            lastRdsSeq = entry.first;
+                        }
                     }
                 }
-                if (!rdsLine.empty()) {
-                    rdsLine += "\n";
+                for (const std::string& rdsLineBase : rdsLines) {
+                    std::string rdsLine = rdsLineBase + "\n";
                     if (send(clientSocket, rdsLine.c_str(), rdsLine.length(), 0) <= 0) {
+                        sendFailed = true;
                         break;
                     }
+                }
+                if (sendFailed) {
+                    break;
                 }
 
-                std::string scanLine;
+                std::vector<std::string> scanLines;
                 {
                     std::lock_guard<std::mutex> lock(m_scanMutex);
-                    if (!m_scanQueue.empty()) {
-                        scanLine = m_scanQueue.front();
-                        m_scanQueue.pop_front();
+                    for (const auto& entry : m_scanQueue) {
+                        if (entry.first > lastScanSeq) {
+                            scanLines.push_back(entry.second);
+                            lastScanSeq = entry.first;
+                        }
                     }
                 }
-                if (!scanLine.empty()) {
-                    scanLine += "\n";
+                for (const std::string& scanLineBase : scanLines) {
+                    std::string scanLine = scanLineBase + "\n";
                     if (send(clientSocket, scanLine.c_str(), scanLine.length(), 0) <= 0) {
+                        sendFailed = true;
                         break;
                     }
+                }
+                if (sendFailed) {
+                    break;
                 }
 
                 int intervalMs = m_samplingInterval.load();
@@ -606,7 +733,7 @@ void XDRServer::handleXdrClient(int clientSocket, const char* clientIP) {
                 line.pop_back();
             }
 
-            std::string response = processCommand(line);
+            std::string response = processCommand(line, authenticated, guestSession);
             if (!response.empty()) {
                 response += "\n";
                 send(clientSocket, response.c_str(), response.length(), 0);
@@ -615,18 +742,16 @@ void XDRServer::handleXdrClient(int clientSocket, const char* clientIP) {
     }
     setRecvTimeoutMs(clientSocket, 0);
 
-    m_authenticated = false;
-    m_guestSession = false;
     m_scanCancelPending = true;
 }
 
-std::string XDRServer::processCommand(const std::string& cmd) {
+std::string XDRServer::processCommand(const std::string& cmd, bool authenticated, bool guestSession) {
     if (cmd.empty()) {
         m_scanCancelPending = true;
         return "";
     }
 
-    if (!m_authenticated) {
+    if (!authenticated) {
         return "a0";
     }
 
@@ -896,7 +1021,7 @@ std::string XDRServer::processCommand(const std::string& cmd) {
             return "N" + std::to_string(m_pilotTenthsKHz.load());
 
         case 'o':
-            return m_guestSession ? "o0,1" : "o1,0";
+            return guestSession ? "o0,1" : "o1,0";
 
         default:
             return "";

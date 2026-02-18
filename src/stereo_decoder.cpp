@@ -23,6 +23,10 @@ constexpr float kPilotCoherenceAcquire = 0.25f;
 constexpr float kPilotCoherenceHold = 0.16f;
 constexpr float kPllLockAcquireHz = 120.0f;
 constexpr float kPllLockHoldHz = 220.0f;
+constexpr float kPilotEnvSmooth = 0.9995f;
+constexpr float kPilotEnvInject = 1.0f - kPilotEnvSmooth;
+constexpr float kPilotIqSmooth = 0.9995f;
+constexpr float kPilotIqInject = 1.0f - kPilotIqSmooth;
 
 float dotProductScalar(const float* a, const float* b, size_t n) {
     float sum = 0.0f;
@@ -94,11 +98,12 @@ float dotProductAvx2Fma(const float* a, const float* b, size_t n) {
 #endif
 }  // namespace
 
-StereoDecoder::StereoDecoder(int inputRate, int outputRate)
+StereoDecoder::StereoDecoder(int inputRate, int /*outputRate*/)
     : m_inputRate(inputRate)
     , m_stereoDetected(false)
     , m_forceStereo(false)
     , m_forceMono(false)
+    , m_blendMode(BlendMode::Normal)
     , m_pilotMagnitude(0.0f)
     , m_pilotBandMagnitude(0.0f)
     , m_mpxMagnitude(0.0f)
@@ -139,7 +144,6 @@ StereoDecoder::StereoDecoder(int inputRate, int outputRate)
     // Match SDR++ broadcast_fm delay around pilot filter latency.
     m_delaySamples = static_cast<int>((m_pilotTaps.size() > 0) ? ((m_pilotTaps.size() - 1) / 2 + 1) : 0);
     m_delayLine.assign(static_cast<size_t>(std::max(1, m_delaySamples + 1)), 0.0f);
-    (void)outputRate;
 }
 
 StereoDecoder::~StereoDecoder() = default;
@@ -180,8 +184,27 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
         return 0;
     }
 
-    const float blendAttack = 1.0f - std::exp(-1.0f / (0.120f * static_cast<float>(m_inputRate)));
-    const float blendRelease = 1.0f - std::exp(-1.0f / (0.030f * static_cast<float>(m_inputRate)));
+    float attackTau = 0.120f;
+    float releaseTau = 0.030f;
+    float lowQualityGate = 0.85f;
+    float lockFloor = 0.02f;
+    float prelockMax = 0.30f;
+    if (m_blendMode == BlendMode::Soft) {
+        attackTau = 0.090f;
+        releaseTau = 0.040f;
+        lowQualityGate = 0.75f;
+        lockFloor = 0.08f;
+        prelockMax = 0.45f;
+    } else if (m_blendMode == BlendMode::Aggressive) {
+        attackTau = 0.180f;
+        releaseTau = 0.015f;
+        lowQualityGate = 0.95f;
+        lockFloor = 0.00f;
+        prelockMax = 0.18f;
+    }
+
+    const float blendAttack = 1.0f - std::exp(-1.0f / (attackTau * static_cast<float>(m_inputRate)));
+    const float blendRelease = 1.0f - std::exp(-1.0f / (releaseTau * static_cast<float>(m_inputRate)));
     const float nominalPllFreq = 2.0f * kPi * 19000.0f / static_cast<float>(m_inputRate);
     auto computeBlendTarget = [&](float pilotMag, float pilotRatio, float pilotCoherence, float pllErrHz) -> float {
         if (m_forceMono) {
@@ -200,9 +223,22 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
         const float pllQ = std::clamp((kPllLockHoldHz - pllErrHz) /
                                       std::max(kPllLockHoldHz - kPllLockAcquireHz, 1e-3f), 0.0f, 1.0f);
         const float quality = std::min(absQ, std::min(ratioQ, std::min(cohQ, pllQ)));
+        float qualityShaped = quality * quality;
+        if (m_blendMode == BlendMode::Soft) {
+            qualityShaped = std::sqrt(std::max(0.0f, quality));
+        } else if (m_blendMode == BlendMode::Aggressive) {
+            qualityShaped = quality * quality * quality;
+        }
+
+        // Drop to mono quickly when pilot quality degrades to avoid noisy/choppy stereo.
+        if (pilotRatio < (kPilotRatioHold * lowQualityGate) ||
+            pilotCoherence < (kPilotCoherenceHold * lowQualityGate) ||
+            pllErrHz > (kPllLockHoldHz * 1.10f)) {
+            return 0.0f;
+        }
 
         if (m_stereoDetected) {
-            return std::clamp(0.15f + (0.85f * quality), 0.15f, 1.0f);
+            return std::clamp(lockFloor + ((1.0f - lockFloor) * qualityShaped), 0.0f, 1.0f);
         }
 
         const bool prelockPilot = (m_mpxMagnitude > kMpxMinAcquire) &&
@@ -213,7 +249,7 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
         if (!prelockPilot) {
             return 0.0f;
         }
-        return std::clamp(0.05f + (0.45f * quality), 0.05f, 0.50f);
+        return std::clamp(0.02f + ((prelockMax - 0.02f) * qualityShaped), 0.0f, prelockMax);
     };
 
     size_t outCount = 0;
@@ -222,8 +258,8 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
 
         // Pilot extraction and PLL tracking (SDR++ style: pilot BPF then PLL).
         const float pilot = filterSample(mpx, m_pilotTapsRev, m_pilotHistory, m_pilotHistPos);
-        m_pilotBandMagnitude = (m_pilotBandMagnitude * 0.995f) + (std::abs(pilot) * 0.005f);
-        m_mpxMagnitude = (m_mpxMagnitude * 0.995f) + (std::abs(mpx) * 0.005f);
+        m_pilotBandMagnitude = (m_pilotBandMagnitude * kPilotEnvSmooth) + (std::abs(pilot) * kPilotEnvInject);
+        m_mpxMagnitude = (m_mpxMagnitude * kPilotEnvSmooth) + (std::abs(mpx) * kPilotEnvInject);
         const float vcoI = std::cos(m_pllPhase);
         const float vcoQ = std::sin(m_pllPhase);
         const float error = pilot * vcoQ;
@@ -236,8 +272,8 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
             m_pllPhase += 2.0f * kPi;
         }
 
-        m_pilotI = (m_pilotI * 0.995f) + ((pilot * vcoI) * 0.005f);
-        m_pilotQ = (m_pilotQ * 0.995f) + ((pilot * vcoQ) * 0.005f);
+        m_pilotI = (m_pilotI * kPilotIqSmooth) + ((pilot * vcoI) * kPilotIqInject);
+        m_pilotQ = (m_pilotQ * kPilotIqSmooth) + ((pilot * vcoQ) * kPilotIqInject);
         const float pilotMagNow = std::sqrt((m_pilotI * m_pilotI) + (m_pilotQ * m_pilotQ));
         const float pilotRatioNow = m_pilotBandMagnitude / std::max(m_mpxMagnitude, 1e-3f);
         const float pilotCoherenceNow = pilotMagNow / std::max(m_pilotBandMagnitude, 1e-4f);

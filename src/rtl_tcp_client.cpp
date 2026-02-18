@@ -1,4 +1,5 @@
 #include "rtl_tcp_client.h"
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -15,7 +16,9 @@ RTLTCPClient::RTLTCPClient(const std::string& host, uint16_t port)
     , m_socket(-1)
     , m_connected(false)
     , m_frequency(0)
-    , m_sampleRate(1024000) {
+    , m_sampleRate(1024000)
+    , m_havePendingIqByte(false)
+    , m_pendingIqByte(0) {
 }
 
 RTLTCPClient::~RTLTCPClient() {
@@ -23,37 +26,52 @@ RTLTCPClient::~RTLTCPClient() {
 }
 
 bool RTLTCPClient::connect() {
-    m_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (m_socket < 0) {
-        std::cerr << "Failed to create socket" << std::endl;
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    struct addrinfo* results = nullptr;
+    const std::string portStr = std::to_string(m_port);
+    const int gai = getaddrinfo(m_host.c_str(), portStr.c_str(), &hints, &results);
+    if (gai != 0 || !results) {
+        std::cerr << "Invalid address: " << m_host
+                  << " (" << gai_strerror(gai) << ")" << std::endl;
         return false;
     }
 
-    struct sockaddr_in serverAddr;
-    memset(&serverAddr, 0, sizeof(serverAddr));
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(m_port);
-
-    if (inet_pton(AF_INET, m_host.c_str(), &serverAddr.sin_addr) <= 0) {
-        struct hostent* he = gethostbyname(m_host.c_str());
-        if (!he) {
-            std::cerr << "Invalid address: " << m_host << std::endl;
-            close(m_socket);
-            m_socket = -1;
-            return false;
+    m_socket = -1;
+    for (struct addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
+        const int sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (sock < 0) {
+            continue;
         }
-        memcpy(&serverAddr.sin_addr, he->h_addr_list[0], he->h_length);
+        if (::connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
+            m_socket = sock;
+            break;
+        }
+        close(sock);
     }
+    freeaddrinfo(results);
 
-    if (::connect(m_socket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+    if (m_socket < 0) {
         std::cerr << "Failed to connect to " << m_host << ":" << m_port << std::endl;
-        close(m_socket);
-        m_socket = -1;
         return false;
     }
+
+    // Guard initial rtl_tcp header read so connect() cannot block forever.
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     uint8_t header[12];
     if (readResponse(header, sizeof(header))) {
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        m_havePendingIqByte = false;
         m_connected = true;
         return true;
     }
@@ -70,6 +88,7 @@ void RTLTCPClient::disconnect() {
         m_socket = -1;
     }
     m_connected = false;
+    m_havePendingIqByte = false;
 }
 
 bool RTLTCPClient::sendAll(const uint8_t* data, size_t len) {
@@ -122,14 +141,39 @@ size_t RTLTCPClient::readIQ(uint8_t* buffer, size_t maxSamples) {
     }
 
     size_t bytesToRead = maxSamples * 2;
+    if (bytesToRead == 0) {
+        return 0;
+    }
     size_t totalRead = 0;
+    if (m_havePendingIqByte) {
+        buffer[0] = m_pendingIqByte;
+        m_havePendingIqByte = false;
+        totalRead = 1;
+    }
 
     while (totalRead < bytesToRead) {
         ssize_t n = recv(m_socket, buffer + totalRead, bytesToRead - totalRead, 0);
-        if (n <= 0) {
+        if (n > 0) {
+            totalRead += static_cast<size_t>(n);
+            continue;
+        }
+        if (n == 0) {
+            m_connected = false;
             break;
         }
-        totalRead += n;
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        }
+        break;
+    }
+
+    if ((totalRead & 1u) != 0u) {
+        m_pendingIqByte = buffer[totalRead - 1];
+        m_havePendingIqByte = true;
+        totalRead--;
     }
 
     return totalRead / 2;

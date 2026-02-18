@@ -8,9 +8,13 @@
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <deque>
 #include <string>
+#include <vector>
+#include <utility>
+#include <array>
 
 class XDRServer {
 public:
@@ -40,6 +44,7 @@ public:
     void updateSignal(float level, bool stereo, bool forcedMono, int cci = -1, int aci = -1);
     void updatePilot(int pilotTenthsKHz);
     void updateRDS(uint16_t blockA, uint16_t blockB, uint16_t blockC, uint16_t blockD, uint8_t errors);
+    void setFrequencyState(uint32_t freqHz);
 
     void setFrequencyCallback(FrequencyCallback cb);
     void setVolumeCallback(VolumeCallback cb);
@@ -90,10 +95,12 @@ public:
     void pushScanLine(const std::string& line);
 
 private:
+    void addClientSocket(int clientSocket);
+    void removeClientSocket(int clientSocket);
     void handleClient(int clientSocket);
     void handleFmdxClient(int clientSocket);
     void handleXdrClient(int clientSocket, const char* clientIP);
-    std::string processCommand(const std::string& cmd);
+    std::string processCommand(const std::string& cmd, bool authenticated, bool guestSession);
     std::string processFmdxCommand(const std::string& cmd);
     std::string generateSalt();
     std::string computeSHA1(const std::string& salt, const std::string& password);
@@ -105,11 +112,14 @@ private:
     int m_serverSocket;
     std::atomic<bool> m_running;
     std::thread m_acceptThread;
+    std::mutex m_clientSocketsMutex;
+    std::vector<int> m_clientSockets;
+    std::atomic<int> m_activeClientThreads;
+    std::mutex m_clientThreadWaitMutex;
+    std::condition_variable m_clientThreadWaitCv;
 
     std::string m_password;
     bool m_guestMode;
-    bool m_authenticated;
-    bool m_guestSession;
     std::atomic<bool> m_verboseLogging;
 
     std::atomic<int> m_mode;
@@ -133,8 +143,13 @@ private:
     std::atomic<int> m_cci;
     std::atomic<int> m_aci;
     std::atomic<int> m_pilotTenthsKHz;
-    std::deque<std::string> m_rdsQueue;
+    std::deque<std::pair<uint64_t, std::string>> m_rdsQueue;
+    uint64_t m_rdsNextSeq = 1;
     std::mutex m_rdsMutex;
+    std::array<uint16_t, 64> m_piHistory{};
+    std::array<uint8_t, 64> m_piErrorHistory{};
+    uint8_t m_piHistFill = 0;
+    uint8_t m_piHistPos = 0;
     std::atomic<int> m_scanStartKHz;
     std::atomic<int> m_scanStopKHz;
     std::atomic<int> m_scanStepKHz;
@@ -143,7 +158,8 @@ private:
     std::atomic<bool> m_scanContinuous;
     std::atomic<bool> m_scanStartPending;
     std::atomic<bool> m_scanCancelPending;
-    std::deque<std::string> m_scanQueue;
+    std::deque<std::pair<uint64_t, std::string>> m_scanQueue;
+    uint64_t m_scanNextSeq = 1;
     std::mutex m_scanMutex;
 
     IntCallback m_modeCallback;

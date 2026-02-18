@@ -23,6 +23,7 @@ private:
     float sinc(float x) const;
     void designPolyphaseKernel();
     float convolveDot(const float* samples, const float* taps, size_t count) const;
+    void processDCBlock(float* left, float* right, size_t samples);
 
     int m_inputRate;
     int m_outputRate;
@@ -43,6 +44,12 @@ private:
     float m_deemphAlpha;
     float m_deemphStateLeft;
     float m_deemphStateRight;
+
+    float m_dcBlockPrevInLeft;
+    float m_dcBlockPrevInRight;
+    float m_dcBlockPrevOutLeft;
+    float m_dcBlockPrevOutRight;
+    static constexpr float kDcBlockR = 0.995f;
 };
 
 #endif

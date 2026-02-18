@@ -1,11 +1,12 @@
 #include "fm_demod.h"
+#include "cpu_features.h"
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
 #include <limits>
 
-#if defined(__AVX2__) && defined(__FMA__)
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
 #endif
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
@@ -13,28 +14,27 @@
 #endif
 
 namespace {
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(__has_attribute)
+#if __has_attribute(target)
+#define FMTUNER_FMDEMOD_HAS_AVX2_KERNEL 1
+#define FMTUNER_FMDEMOD_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#elif defined(__GNUC__)
+#define FMTUNER_FMDEMOD_HAS_AVX2_KERNEL 1
+#define FMTUNER_FMDEMOD_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#endif
+#ifndef FMTUNER_FMDEMOD_HAS_AVX2_KERNEL
+#define FMTUNER_FMDEMOD_HAS_AVX2_KERNEL 0
+#define FMTUNER_FMDEMOD_AVX2_TARGET
+#endif
+
 const std::array<float, 256>& iqNormLut() {
     static const std::array<float, 256> lut = []() {
         std::array<float, 256> out{};
         for (int v = 0; v < 256; v++) {
-            out[static_cast<size_t>(v)] = (static_cast<float>(v) - 127.5f) / 127.5f;
-        }
-        return out;
-    }();
-    return lut;
-}
-
-const std::array<float, 256 * 256>& iqInvPowerLut() {
-    static const std::array<float, 256 * 256> lut = []() {
-        constexpr float kEps = 1e-12f;
-        std::array<float, 256 * 256> out{};
-        for (int i = 0; i < 256; i++) {
-            const float iNorm = (static_cast<float>(i) - 127.5f) / 127.5f;
-            for (int q = 0; q < 256; q++) {
-                const float qNorm = (static_cast<float>(q) - 127.5f) / 127.5f;
-                const float denom = (iNorm * iNorm) + (qNorm * qNorm) + kEps;
-                out[static_cast<size_t>((i << 8) | q)] = 1.0f / denom;
-            }
+            out[static_cast<size_t>(v)] = (static_cast<float>(v) - 127.0f) / 127.5f;
         }
         return out;
     }();
@@ -51,10 +51,33 @@ float firLinearScalar(const float* tapsRev,
     return sample;
 }
 
-#if defined(__AVX2__) && defined(__FMA__)
-float firLinearAvx2Fma(const float* tapsRev,
-                       const float* historyLinear,
-                       size_t tapCount) {
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+float firLinearSse2(const float* tapsRev,
+                    const float* historyLinear,
+                    size_t tapCount) {
+    __m128 acc = _mm_setzero_ps();
+    size_t t = 0;
+
+    for (; t + 4 <= tapCount; t += 4) {
+        const __m128 tapVec = _mm_loadu_ps(tapsRev + t);
+        const __m128 histVec = _mm_loadu_ps(historyLinear + t);
+        acc = _mm_add_ps(acc, _mm_mul_ps(tapVec, histVec));
+    }
+
+    alignas(16) float sumArr[4];
+    _mm_store_ps(sumArr, acc);
+    float sum = sumArr[0] + sumArr[1] + sumArr[2] + sumArr[3];
+    for (; t < tapCount; t++) {
+        sum += tapsRev[t] * historyLinear[t];
+    }
+    return sum;
+}
+#endif
+
+#if FMTUNER_FMDEMOD_HAS_AVX2_KERNEL
+FMTUNER_FMDEMOD_AVX2_TARGET float firLinearAvx2Fma(const float* tapsRev,
+                                                    const float* historyLinear,
+                                                    size_t tapCount) {
     __m256 acc = _mm256_setzero_ps();
     size_t t = 0;
 
@@ -125,8 +148,23 @@ FMDemod::FMDemod(int inputRate, int outputRate)
     , m_deemphasisState(0.0f)
     , m_bandwidthMode(0)
     , m_audioHistPos(0)
-    , m_decimPhase(0) {
+    , m_decimPhase(0)
+    , m_decimHistPos(0)
+    , m_iqHistPos(0)
+    , m_iqPrevInI(0.0f)
+    , m_iqPrevInQ(0.0f)
+    , m_iqDcStateI(0.0f)
+    , m_iqDcStateQ(0.0f)
+    , m_useNeon(false)
+    , m_useSse2(false)
+    , m_useAvx2(false) {
+    const CPUFeatures cpu = detectCPUFeatures();
+    m_useNeon = cpu.neon;
+    m_useSse2 = cpu.sse2;
+    m_useAvx2 = cpu.avx2 && cpu.fma;
     initAudioFilter();
+    initIQFilter();
+    initDecimFilter();
     setDeviation(75000.0);
     setDeemphasis(75);
 }
@@ -156,13 +194,68 @@ void FMDemod::reset() {
     m_havePrevIQ = false;
     m_deemphasisState = 0.0f;
     m_audioHistPos = 0;
+    m_decimHistPos = 0;
     m_decimPhase = 0;
     std::fill(m_audioHistoryLinear.begin(), m_audioHistoryLinear.end(), 0.0f);
+    std::fill(m_decimHistoryLinear.begin(), m_decimHistoryLinear.end(), 0.0f);
+    m_iqHistPos = 0;
+    m_iqPrevInI = 0.0f;
+    m_iqPrevInQ = 0.0f;
+    m_iqDcStateI = 0.0f;
+    m_iqDcStateQ = 0.0f;
+    std::fill(m_iqIHistory.begin(), m_iqIHistory.end(), 0.0f);
+    std::fill(m_iqQHistory.begin(), m_iqQHistory.end(), 0.0f);
 }
 
 void FMDemod::initAudioFilter() {
     // Default wide channel filter for MPX path.
     rebuildAudioFilter(120000.0);
+}
+
+void FMDemod::initIQFilter() {
+    // Complex pre-demod channel filtering to reduce adjacent-channel energy.
+    rebuildIQFilter(110000.0);
+}
+
+void FMDemod::initDecimFilter() {
+    constexpr double cutoffHz = 15000.0;
+    constexpr double transitionHz = 4000.0;
+    int tapCount = static_cast<int>(std::ceil(3.8 * static_cast<double>(m_inputRate) / transitionHz));
+    tapCount = std::clamp(tapCount, 63, 1023);
+    if ((tapCount % 2) == 0) {
+        tapCount++;
+    }
+
+    m_decimTaps.assign(static_cast<size_t>(tapCount), 0.0f);
+    const int mid = tapCount / 2;
+    const double omega = 2.0 * M_PI * cutoffHz / static_cast<double>(m_inputRate);
+    double sum = 0.0;
+    for (int n = 0; n < tapCount; n++) {
+        const int m = n - mid;
+        const double sinc = (m == 0)
+            ? (omega / M_PI)
+            : (std::sin(omega * static_cast<double>(m)) / (M_PI * static_cast<double>(m)));
+        const double x = 2.0 * M_PI * static_cast<double>(n) / static_cast<double>(tapCount - 1);
+        const double window = 0.355768
+                            - 0.487396 * std::cos(x)
+                            + 0.144232 * std::cos(2.0 * x)
+                            - 0.012604 * std::cos(3.0 * x);
+        const double h = sinc * window;
+        m_decimTaps[static_cast<size_t>(n)] = static_cast<float>(h);
+        sum += h;
+    }
+
+    if (std::abs(sum) > 1e-12) {
+        const float invSum = static_cast<float>(1.0 / sum);
+        for (float& tap : m_decimTaps) {
+            tap *= invSum;
+        }
+    }
+
+    m_decimTapsRev.resize(m_decimTaps.size());
+    std::reverse_copy(m_decimTaps.begin(), m_decimTaps.end(), m_decimTapsRev.begin());
+    m_decimHistoryLinear.assign(m_decimTaps.size() * 2, 0.0f);
+    m_decimHistPos = 0;
 }
 
 void FMDemod::rebuildAudioFilter(double cutoffHz) {
@@ -213,6 +306,47 @@ void FMDemod::rebuildAudioFilter(double cutoffHz) {
     m_decimPhase = 0;
 }
 
+void FMDemod::rebuildIQFilter(double cutoffHz) {
+    constexpr double transitionHz = 16000.0;
+    int tapCount = static_cast<int>(std::ceil(3.8 * static_cast<double>(m_inputRate) / transitionHz));
+    tapCount = std::clamp(tapCount, 33, 255);
+    if ((tapCount % 2) == 0) {
+        tapCount++;
+    }
+
+    m_iqTaps.assign(static_cast<size_t>(tapCount), 0.0f);
+    const int mid = tapCount / 2;
+    const double omega = 2.0 * M_PI * cutoffHz / static_cast<double>(m_inputRate);
+    double sum = 0.0;
+    for (int n = 0; n < tapCount; n++) {
+        const int m = n - mid;
+        const double sinc = (m == 0)
+            ? (omega / M_PI)
+            : (std::sin(omega * static_cast<double>(m)) / (M_PI * static_cast<double>(m)));
+        const double x = 2.0 * M_PI * static_cast<double>(n) / static_cast<double>(tapCount - 1);
+        const double window = 0.355768
+                            - 0.487396 * std::cos(x)
+                            + 0.144232 * std::cos(2.0 * x)
+                            - 0.012604 * std::cos(3.0 * x);
+        const double h = sinc * window;
+        m_iqTaps[static_cast<size_t>(n)] = static_cast<float>(h);
+        sum += h;
+    }
+
+    if (std::abs(sum) > 1e-12) {
+        const float invSum = static_cast<float>(1.0 / sum);
+        for (float& tap : m_iqTaps) {
+            tap *= invSum;
+        }
+    }
+
+    m_iqTapsRev.resize(m_iqTaps.size());
+    std::reverse_copy(m_iqTaps.begin(), m_iqTaps.end(), m_iqTapsRev.begin());
+    m_iqIHistory.assign(m_iqTaps.size() * 2, 0.0f);
+    m_iqQHistory.assign(m_iqTaps.size() * 2, 0.0f);
+    m_iqHistPos = 0;
+}
+
 void FMDemod::setBandwidthMode(int mode) {
     static constexpr int kTefBwHz[] = {
         311000, 287000, 254000, 236000, 217000, 200000, 184000, 168000,
@@ -248,11 +382,15 @@ void FMDemod::setBandwidthHz(int bwHz) {
     m_bandwidthMode = selected;
     const int selectedBwHz = kTefBwHz[selected];
     // Approximate channel selectivity from TEF bandwidth to MPX cutoff:
-    // BW/2 in baseband, clamped to preserve pilot/stereo operation.
+    // Keep enough MPX bandwidth for stereo (38 kHz) and RDS (57 kHz).
     const double cutoffHz = (selectedBwHz > 0)
-                                ? std::clamp(static_cast<double>(selectedBwHz) * 0.5, 30000.0, 120000.0)
+                                ? std::clamp(static_cast<double>(selectedBwHz) * 0.5, 60000.0, 120000.0)
                                 : 120000.0;
     rebuildAudioFilter(cutoffHz);
+    const double iqCutoffHz = (selectedBwHz > 0)
+                                  ? std::clamp(static_cast<double>(selectedBwHz) * 0.45, 90000.0, 120000.0)
+                                  : 110000.0;
+    rebuildIQFilter(iqCutoffHz);
 }
 
 void FMDemod::setDemodMode(DemodMode mode) {
@@ -270,9 +408,14 @@ void FMDemod::setDemodMode(DemodMode mode) {
 void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
     constexpr float kPi = 3.14159265358979323846f;
     constexpr float kTwoPi = 6.28318530717958647692f;
+    constexpr float kDcBlockR = 0.9995f;
+    constexpr float kEps = 1e-12f;
     const auto& kIqNorm = iqNormLut();
-    const auto& kInvPower = iqInvPowerLut();
     const uint8_t* iqPtr = iq;
+    if (m_iqTaps.empty() || m_iqTapsRev.empty() || m_iqIHistory.empty() || m_iqQHistory.empty()) {
+        initIQFilter();
+    }
+    const size_t iqTapCount = m_iqTaps.size();
 
     if (m_demodMode == DemodMode::Fast) {
         float prevI = m_prevI;
@@ -280,11 +423,54 @@ void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
         bool havePrev = m_havePrevIQ;
         for (size_t i = 0; i < len; i++) {
             // rtl_tcp provides unsigned 8-bit IQ centered at 127.5.
-            const uint8_t iRaw = iqPtr[0];
-            const uint8_t qRaw = iqPtr[1];
-            const float i_val = kIqNorm[iRaw];
-            const float q_val = kIqNorm[qRaw];
+            const float iRaw = kIqNorm[iqPtr[0]];
+            const float qRaw = kIqNorm[iqPtr[1]];
             iqPtr += 2;
+
+            // Remove ADC DC offset and front-end LO bias from raw IQ.
+            const float iDc = (iRaw - m_iqPrevInI) + (kDcBlockR * m_iqDcStateI);
+            const float qDc = (qRaw - m_iqPrevInQ) + (kDcBlockR * m_iqDcStateQ);
+            m_iqPrevInI = iRaw;
+            m_iqPrevInQ = qRaw;
+            m_iqDcStateI = iDc;
+            m_iqDcStateQ = qDc;
+
+            // Pre-demod complex channel filter.
+            m_iqIHistory[m_iqHistPos] = iDc;
+            m_iqIHistory[m_iqHistPos + iqTapCount] = iDc;
+            m_iqQHistory[m_iqHistPos] = qDc;
+            m_iqQHistory[m_iqHistPos + iqTapCount] = qDc;
+            m_iqHistPos++;
+            if (m_iqHistPos >= iqTapCount) {
+                m_iqHistPos = 0;
+            }
+
+            const float* iWindow = &m_iqIHistory[m_iqHistPos];
+            const float* qWindow = &m_iqQHistory[m_iqHistPos];
+            float i_val = 0.0f;
+            float q_val = 0.0f;
+#if FMTUNER_FMDEMOD_HAS_AVX2_KERNEL
+            if (m_useAvx2) {
+                i_val = firLinearAvx2Fma(m_iqTapsRev.data(), iWindow, iqTapCount);
+                q_val = firLinearAvx2Fma(m_iqTapsRev.data(), qWindow, iqTapCount);
+            } else
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+            if (m_useNeon) {
+                i_val = firLinearNeon(m_iqTapsRev.data(), iWindow, iqTapCount);
+                q_val = firLinearNeon(m_iqTapsRev.data(), qWindow, iqTapCount);
+            } else
+#endif
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+            if (m_useSse2) {
+                i_val = firLinearSse2(m_iqTapsRev.data(), iWindow, iqTapCount);
+                q_val = firLinearSse2(m_iqTapsRev.data(), qWindow, iqTapCount);
+            } else
+#endif
+            {
+                i_val = firLinearScalar(m_iqTapsRev.data(), iWindow, iqTapCount);
+                q_val = firLinearScalar(m_iqTapsRev.data(), qWindow, iqTapCount);
+            }
 
             if (!havePrev) {
                 audio[i] = 0.0f;
@@ -297,7 +483,7 @@ void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
             // Fast quadrature FM discriminator (avoids atan2 in the hot loop).
             const float dI = i_val - prevI;
             const float dQ = q_val - prevQ;
-            const float invPower = kInvPower[static_cast<size_t>((static_cast<uint16_t>(iRaw) << 8) | qRaw)];
+            const float invPower = 1.0f / ((i_val * i_val) + (q_val * q_val) + kEps);
             const float delta = ((i_val * dQ) - (q_val * dI)) * invPower;
             audio[i] = delta * m_invDeviation;
             prevI = i_val;
@@ -312,9 +498,52 @@ void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
     float lastPhase = m_lastPhase;
     bool havePhase = m_haveLastPhase;
     for (size_t i = 0; i < len; i++) {
-        const float i_val = kIqNorm[iqPtr[0]];
-        const float q_val = kIqNorm[iqPtr[1]];
+        const float iRaw = kIqNorm[iqPtr[0]];
+        const float qRaw = kIqNorm[iqPtr[1]];
         iqPtr += 2;
+
+        const float iDc = (iRaw - m_iqPrevInI) + (kDcBlockR * m_iqDcStateI);
+        const float qDc = (qRaw - m_iqPrevInQ) + (kDcBlockR * m_iqDcStateQ);
+        m_iqPrevInI = iRaw;
+        m_iqPrevInQ = qRaw;
+        m_iqDcStateI = iDc;
+        m_iqDcStateQ = qDc;
+
+        m_iqIHistory[m_iqHistPos] = iDc;
+        m_iqIHistory[m_iqHistPos + iqTapCount] = iDc;
+        m_iqQHistory[m_iqHistPos] = qDc;
+        m_iqQHistory[m_iqHistPos + iqTapCount] = qDc;
+        m_iqHistPos++;
+        if (m_iqHistPos >= iqTapCount) {
+            m_iqHistPos = 0;
+        }
+
+        const float* iWindow = &m_iqIHistory[m_iqHistPos];
+        const float* qWindow = &m_iqQHistory[m_iqHistPos];
+        float i_val = 0.0f;
+        float q_val = 0.0f;
+#if FMTUNER_FMDEMOD_HAS_AVX2_KERNEL
+        if (m_useAvx2) {
+            i_val = firLinearAvx2Fma(m_iqTapsRev.data(), iWindow, iqTapCount);
+            q_val = firLinearAvx2Fma(m_iqTapsRev.data(), qWindow, iqTapCount);
+        } else
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        if (m_useNeon) {
+            i_val = firLinearNeon(m_iqTapsRev.data(), iWindow, iqTapCount);
+            q_val = firLinearNeon(m_iqTapsRev.data(), qWindow, iqTapCount);
+        } else
+#endif
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+        if (m_useSse2) {
+            i_val = firLinearSse2(m_iqTapsRev.data(), iWindow, iqTapCount);
+            q_val = firLinearSse2(m_iqTapsRev.data(), qWindow, iqTapCount);
+        } else
+#endif
+        {
+            i_val = firLinearScalar(m_iqTapsRev.data(), iWindow, iqTapCount);
+            q_val = firLinearScalar(m_iqTapsRev.data(), qWindow, iqTapCount);
+        }
 
         const float phase = std::atan2f(q_val, i_val);
         if (!havePhase) {
@@ -338,19 +567,19 @@ void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
 }
 
 size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamples) {
-    if (m_audioTaps.empty() || m_audioTapsRev.empty() || m_audioHistoryLinear.empty()) {
+    if (m_decimTaps.empty() || m_decimTapsRev.empty() || m_decimHistoryLinear.empty()) {
         return 0;
     }
 
-    const size_t tapCount = m_audioTaps.size();
+    const size_t tapCount = m_decimTaps.size();
     size_t outCount = 0;
 
     for (size_t i = 0; i < numSamples; i++) {
-        m_audioHistoryLinear[m_audioHistPos] = demod[i];
-        m_audioHistoryLinear[m_audioHistPos + tapCount] = demod[i];
-        m_audioHistPos++;
-        if (m_audioHistPos >= tapCount) {
-            m_audioHistPos = 0;
+        m_decimHistoryLinear[m_decimHistPos] = demod[i];
+        m_decimHistoryLinear[m_decimHistPos + tapCount] = demod[i];
+        m_decimHistPos++;
+        if (m_decimHistPos >= tapCount) {
+            m_decimHistPos = 0;
         }
 
         m_decimPhase++;
@@ -359,14 +588,26 @@ size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamp
         }
         m_decimPhase = 0;
 
-        const float* historyWindow = &m_audioHistoryLinear[m_audioHistPos];
-#if defined(__AVX2__) && defined(__FMA__)
-        const float sample = firLinearAvx2Fma(m_audioTapsRev.data(), historyWindow, tapCount);
-#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-        const float sample = firLinearNeon(m_audioTapsRev.data(), historyWindow, tapCount);
-#else
-        const float sample = firLinearScalar(m_audioTapsRev.data(), historyWindow, tapCount);
+        const float* historyWindow = &m_decimHistoryLinear[m_decimHistPos];
+        float sample = 0.0f;
+#if FMTUNER_FMDEMOD_HAS_AVX2_KERNEL
+        if (m_useAvx2) {
+            sample = firLinearAvx2Fma(m_decimTapsRev.data(), historyWindow, tapCount);
+        } else
 #endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        if (m_useNeon) {
+            sample = firLinearNeon(m_decimTapsRev.data(), historyWindow, tapCount);
+        } else
+#endif
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+        if (m_useSse2) {
+            sample = firLinearSse2(m_decimTapsRev.data(), historyWindow, tapCount);
+        } else
+#endif
+        {
+            sample = firLinearScalar(m_decimTapsRev.data(), historyWindow, tapCount);
+        }
 
         // SDR++ applies deemphasis in post-processing after AF resampling.
         m_deemphasisState = (m_deemphAlpha * sample) + ((1.0f - m_deemphAlpha) * m_deemphasisState);
@@ -382,6 +623,20 @@ void FMDemod::process(const uint8_t* iq, float* audio, size_t numSamples) {
     }
     demodulate(iq, m_demodScratch.data(), numSamples);
     downsampleAudio(m_demodScratch.data(), audio, numSamples);
+}
+
+size_t FMDemod::processSplit(const uint8_t* iq, float* mpxOut, float* monoOut, size_t numSamples) {
+    if (m_demodScratch.size() < numSamples) {
+        m_demodScratch.resize(numSamples);
+    }
+    demodulate(iq, m_demodScratch.data(), numSamples);
+    if (mpxOut) {
+        std::memcpy(mpxOut, m_demodScratch.data(), numSamples * sizeof(float));
+    }
+    if (!monoOut) {
+        return 0;
+    }
+    return downsampleAudio(m_demodScratch.data(), monoOut, numSamples);
 }
 
 void FMDemod::processNoDownsample(const uint8_t* iq, float* audio, size_t numSamples) {
@@ -405,13 +660,25 @@ void FMDemod::processNoDownsample(const uint8_t* iq, float* audio, size_t numSam
         }
 
         const float* historyWindow = &m_audioHistoryLinear[m_audioHistPos];
-#if defined(__AVX2__) && defined(__FMA__)
-        const float sample = firLinearAvx2Fma(m_audioTapsRev.data(), historyWindow, tapCount);
-#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-        const float sample = firLinearNeon(m_audioTapsRev.data(), historyWindow, tapCount);
-#else
-        const float sample = firLinearScalar(m_audioTapsRev.data(), historyWindow, tapCount);
+        float sample = 0.0f;
+#if FMTUNER_FMDEMOD_HAS_AVX2_KERNEL
+        if (m_useAvx2) {
+            sample = firLinearAvx2Fma(m_audioTapsRev.data(), historyWindow, tapCount);
+        } else
 #endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        if (m_useNeon) {
+            sample = firLinearNeon(m_audioTapsRev.data(), historyWindow, tapCount);
+        } else
+#endif
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+        if (m_useSse2) {
+            sample = firLinearSse2(m_audioTapsRev.data(), historyWindow, tapCount);
+        } else
+#endif
+        {
+            sample = firLinearScalar(m_audioTapsRev.data(), historyWindow, tapCount);
+        }
         audio[i] = sample;
     }
 }

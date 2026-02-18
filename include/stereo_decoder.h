@@ -9,6 +9,12 @@
 
 class StereoDecoder {
 public:
+    enum class BlendMode {
+        Soft = 0,
+        Normal = 1,
+        Aggressive = 2
+    };
+
     StereoDecoder(int inputRate, int outputRate);
     ~StereoDecoder();
 
@@ -16,6 +22,7 @@ public:
     void reset();
     void setForceStereo(bool force);
     void setForceMono(bool force);
+    void setBlendMode(BlendMode mode) { m_blendMode = mode; }
     int getPilotLevelTenthsKHz() const { return m_pilotLevelTenthsKHz; }
 
     bool isStereo() const { return m_stereoDetected; }
@@ -30,6 +37,7 @@ private:
     bool m_stereoDetected;
     bool m_forceStereo;
     bool m_forceMono;
+    BlendMode m_blendMode;
     float m_pilotMagnitude;
     float m_pilotBandMagnitude;
     float m_mpxMagnitude;

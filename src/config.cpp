@@ -54,10 +54,48 @@ bool parseInt(const std::string& raw, int& out) {
         return false;
     }
 }
+
+bool parseFloat(const std::string& raw, float& out) {
+    try {
+        const std::string t = trim(raw);
+        size_t idx = 0;
+        const float value = std::stof(t, &idx);
+        if (idx != t.size()) {
+            return false;
+        }
+        out = value;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool parseDouble(const std::string& raw, double& out) {
+    try {
+        const std::string t = trim(raw);
+        size_t idx = 0;
+        const double value = std::stod(t, &idx);
+        if (idx != t.size()) {
+            return false;
+        }
+        out = value;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 }  // namespace
 
 void Config::loadDefaults() {
-    *this = Config{};
+    rtl_tcp = RTLTCPSection{};
+    audio = AudioSection{};
+    sdr = SDRSection{};
+    tuner = TunerSection{};
+    xdr = XDRSection{};
+    processing = ProcessingSection{};
+    rds = RDSSection{};
+    debug = DebugSection{};
+    reconnection = ReconnectionSection{};
 }
 
 bool Config::loadFromFile(const std::string& filename) {
@@ -121,17 +159,66 @@ bool Config::loadFromFile(const std::string& filename) {
                 if (parseInt(value, parsed) && parsed > 0) {
                     audio.buffer_size = parsed;
                 }
+            } else if (key == "underflow_fade_ms") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    audio.underflow_fade_ms = std::clamp(parsed, 0, 50);
+                }
+            } else if (key == "click_suppressor") {
+                bool parsed = false;
+                if (parseBool(value, parsed)) {
+                    audio.click_suppressor = parsed;
+                }
+            }
+        } else if (section == "sdr") {
+            if (key == "rtl_gain_db") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    sdr.rtl_gain_db = parsed;
+                }
+            } else if (key == "default_custom_gain_flags" || key == "custom_gain_flags") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    const int rf = ((parsed / 10) % 10) ? 1 : 0;
+                    const int ifv = (parsed % 10) ? 1 : 0;
+                    sdr.default_custom_gain_flags = rf * 10 + ifv;
+                }
+            } else if (key == "overload_auto_gain") {
+                bool parsed = false;
+                if (parseBool(value, parsed)) {
+                    sdr.overload_auto_gain = parsed;
+                }
+            } else if (key == "overload_auto_gain_max_db") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    sdr.overload_auto_gain_max_db = std::clamp(parsed, 0, 49);
+                }
+            } else if (key == "gain_strategy") {
+                const std::string parsed = toLower(trim(value));
+                if (parsed == "tef" || parsed == "sdrpp") {
+                    sdr.gain_strategy = parsed;
+                }
+            } else if (key == "sdrpp_rtl_agc") {
+                bool parsed = false;
+                if (parseBool(value, parsed)) {
+                    sdr.sdrpp_rtl_agc = parsed;
+                }
+            } else if (key == "signal_floor_dbfs") {
+                double parsed = 0.0;
+                if (parseDouble(value, parsed)) {
+                    sdr.signal_floor_dbfs = parsed;
+                }
+            } else if (key == "signal_ceil_dbfs") {
+                double parsed = 0.0;
+                if (parseDouble(value, parsed)) {
+                    sdr.signal_ceil_dbfs = parsed;
+                }
             }
         } else if (section == "tuner") {
             if (key == "default_freq") {
                 int parsed = 0;
                 if (parseInt(value, parsed) && parsed > 0) {
                     tuner.default_freq = static_cast<uint32_t>(parsed);
-                }
-            } else if (key == "default_gain") {
-                int parsed = 0;
-                if (parseInt(value, parsed)) {
-                    tuner.default_gain = parsed;
                 }
             } else if (key == "deemphasis") {
                 int parsed = 0;
@@ -159,15 +246,20 @@ bool Config::loadFromFile(const std::string& filename) {
                 if (parseInt(value, parsed)) {
                     processing.agc_mode = parsed;
                 }
-            } else if (key == "allow_client_gain_override" || key == "allow_client_agc_override") {
+            } else if (key == "client_gain_allowed") {
                 bool parsed = false;
                 if (parseBool(value, parsed)) {
-                    processing.allow_client_gain_override = parsed;
+                    processing.client_gain_allowed = parsed;
                 }
             } else if (key == "demodulator") {
                 const std::string parsed = toLower(trim(value));
                 if (parsed == "fast" || parsed == "exact") {
                     processing.demodulator = parsed;
+                }
+            } else if (key == "stereo_blend") {
+                const std::string parsed = toLower(trim(value));
+                if (parsed == "soft" || parsed == "normal" || parsed == "aggressive") {
+                    processing.stereo_blend = parsed;
                 }
             } else if (key == "stereo") {
                 bool parsed = false;
@@ -178,6 +270,33 @@ bool Config::loadFromFile(const std::string& filename) {
                 bool parsed = false;
                 if (parseBool(value, parsed)) {
                     processing.rds = parsed;
+                }
+            }
+        } else if (section == "rds") {
+            if (key == "aggressiveness") {
+                const std::string parsed = toLower(trim(value));
+                if (parsed == "strict" || parsed == "balanced" || parsed == "loose") {
+                    rds.aggressiveness = parsed;
+                }
+            } else if (key == "agc_attack") {
+                float parsed = 0.0f;
+                if (parseFloat(value, parsed)) {
+                    rds.agc_attack = std::clamp(parsed, 0.90f, 0.99995f);
+                }
+            } else if (key == "agc_release") {
+                float parsed = 0.0f;
+                if (parseFloat(value, parsed)) {
+                    rds.agc_release = std::clamp(parsed, 0.90f, 0.99999f);
+                }
+            } else if (key == "lock_acquire_groups") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    rds.lock_acquire_groups = std::clamp(parsed, 1, 16);
+                }
+            } else if (key == "lock_loss_groups") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    rds.lock_loss_groups = std::clamp(parsed, 1, 64);
                 }
             }
         } else if (section == "debug") {

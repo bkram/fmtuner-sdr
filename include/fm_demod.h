@@ -17,6 +17,7 @@ public:
 
     void process(const uint8_t* iq, float* audio, size_t numSamples);
     void processNoDownsample(const uint8_t* iq, float* audio, size_t numSamples);
+    size_t processSplit(const uint8_t* iq, float* mpxOut, float* monoOut, size_t numSamples);
     size_t downsampleAudio(const float* demod, float* audio, size_t numSamples);
     void reset();
 
@@ -31,6 +32,9 @@ private:
     void demodulate(const uint8_t* iq, float* audio, size_t len);
     void initAudioFilter();
     void rebuildAudioFilter(double cutoffHz);
+    void initIQFilter();
+    void rebuildIQFilter(double cutoffHz);
+    void initDecimFilter();
 
     int m_inputRate;
     int m_outputRate;
@@ -52,9 +56,27 @@ private:
     std::vector<float> m_audioTaps;
     std::vector<float> m_audioTapsRev;
     std::vector<float> m_audioHistoryLinear;
+    std::vector<float> m_decimTaps;
+    std::vector<float> m_decimTapsRev;
+    std::vector<float> m_decimHistoryLinear;
     std::vector<float> m_demodScratch;
     size_t m_audioHistPos;
+    size_t m_decimHistPos;
     int m_decimPhase;
+
+    std::vector<float> m_iqTaps;
+    std::vector<float> m_iqTapsRev;
+    std::vector<float> m_iqIHistory;
+    std::vector<float> m_iqQHistory;
+    size_t m_iqHistPos;
+    float m_iqPrevInI;
+    float m_iqPrevInQ;
+    float m_iqDcStateI;
+    float m_iqDcStateQ;
+
+    bool m_useNeon;
+    bool m_useSse2;
+    bool m_useAvx2;
 };
 
 #endif

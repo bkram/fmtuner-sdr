@@ -39,6 +39,8 @@ private:
     std::atomic<bool> m_connected;
     std::atomic<uint32_t> m_frequency;
     std::atomic<uint32_t> m_sampleRate;
+    bool m_havePendingIqByte;
+    uint8_t m_pendingIqByte;
 };
 
 #endif

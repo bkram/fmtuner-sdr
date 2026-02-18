@@ -13,6 +13,22 @@
 #endif
 
 namespace {
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(__has_attribute)
+#if __has_attribute(target)
+#define FMTUNER_AFPOST_HAS_AVX2_KERNEL 1
+#define FMTUNER_AFPOST_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#elif defined(__GNUC__)
+#define FMTUNER_AFPOST_HAS_AVX2_KERNEL 1
+#define FMTUNER_AFPOST_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#endif
+#ifndef FMTUNER_AFPOST_HAS_AVX2_KERNEL
+#define FMTUNER_AFPOST_HAS_AVX2_KERNEL 0
+#define FMTUNER_AFPOST_AVX2_TARGET
+#endif
+
 float dotProductScalar(const float* a, const float* b, size_t n) {
     float sum = 0.0f;
     for (size_t i = 0; i < n; i++) {
@@ -62,8 +78,8 @@ float dotProductSse(const float* a, const float* b, size_t n) {
     return sum;
 }
 
-#if defined(__AVX2__) && defined(__FMA__)
-float dotProductAvx2Fma(const float* a, const float* b, size_t n) {
+#if FMTUNER_AFPOST_HAS_AVX2_KERNEL
+FMTUNER_AFPOST_AVX2_TARGET float dotProductAvx2Fma(const float* a, const float* b, size_t n) {
     __m256 sumv = _mm256_setzero_ps();
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
@@ -98,7 +114,11 @@ AFPostProcessor::AFPostProcessor(int inputRate, int outputRate)
     , m_deemphasisEnabled(true)
     , m_deemphAlpha(1.0f)
     , m_deemphStateLeft(0.0f)
-    , m_deemphStateRight(0.0f) {
+    , m_deemphStateRight(0.0f)
+    , m_dcBlockPrevInLeft(0.0f)
+    , m_dcBlockPrevInRight(0.0f)
+    , m_dcBlockPrevOutLeft(0.0f)
+    , m_dcBlockPrevOutRight(0.0f) {
     const int g = std::gcd(m_inputRate, m_outputRate);
     m_upFactor = std::max(1, m_outputRate / g);
     m_downFactor = std::max(1, m_inputRate / g);
@@ -159,7 +179,7 @@ float AFPostProcessor::convolveDot(const float* samples, const float* taps, size
     }
 #endif
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-#if defined(__AVX2__) && defined(__FMA__)
+#if FMTUNER_AFPOST_HAS_AVX2_KERNEL
     if (m_useAvx2) {
         return dotProductAvx2Fma(samples, taps, count);
     }
@@ -178,6 +198,10 @@ void AFPostProcessor::reset() {
     m_timeAcc = static_cast<int64_t>(m_halfTaps) * static_cast<int64_t>(m_upFactor);
     m_deemphStateLeft = 0.0f;
     m_deemphStateRight = 0.0f;
+    m_dcBlockPrevInLeft = 0.0f;
+    m_dcBlockPrevInRight = 0.0f;
+    m_dcBlockPrevOutLeft = 0.0f;
+    m_dcBlockPrevOutRight = 0.0f;
 }
 
 void AFPostProcessor::setDeemphasis(int tau_us) {
@@ -256,5 +280,25 @@ size_t AFPostProcessor::process(const float* inLeft,
         m_bufferStart = 0;
     }
 
+    processDCBlock(outLeft, outRight, outCount);
+
     return outCount;
+}
+
+void AFPostProcessor::processDCBlock(float* left, float* right, size_t samples) {
+    for (size_t i = 0; i < samples; i++) {
+        const float inL = left[i];
+        const float inR = right[i];
+
+        const float outL = (inL - m_dcBlockPrevInLeft) + (kDcBlockR * m_dcBlockPrevOutLeft);
+        const float outR = (inR - m_dcBlockPrevInRight) + (kDcBlockR * m_dcBlockPrevOutRight);
+
+        m_dcBlockPrevInLeft = inL;
+        m_dcBlockPrevInRight = inR;
+        m_dcBlockPrevOutLeft = outL;
+        m_dcBlockPrevOutRight = outR;
+
+        left[i] = outL;
+        right[i] = outR;
+    }
 }

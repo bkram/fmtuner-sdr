@@ -13,6 +13,22 @@
 #endif
 
 namespace {
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(__has_attribute)
+#if __has_attribute(target)
+#define FMTUNER_RDS_HAS_AVX2_KERNEL 1
+#define FMTUNER_RDS_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#elif defined(__GNUC__)
+#define FMTUNER_RDS_HAS_AVX2_KERNEL 1
+#define FMTUNER_RDS_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#endif
+#ifndef FMTUNER_RDS_HAS_AVX2_KERNEL
+#define FMTUNER_RDS_HAS_AVX2_KERNEL 0
+#define FMTUNER_RDS_AVX2_TARGET
+#endif
+
 constexpr float kPi = 3.14159265358979323846f;
 constexpr int kRdsOutputRate = 19000;
 constexpr int kRdsSps = 16;  // 19000 / 1187.5
@@ -21,8 +37,6 @@ constexpr uint16_t kInPoly = 0b1100011011;
 constexpr int kBlockLen = 26;
 constexpr int kDataLen = 16;
 constexpr int kPolyLen = 10;
-constexpr int kLockAcquireGroups = 3;
-constexpr int kLockLossGroups = 8;
 
 constexpr std::array<uint16_t, 5> kSyndromes = {
     0b1111011000,  // A
@@ -89,8 +103,8 @@ float dotProductSse(const float* a, const float* b, size_t n) {
     return sum;
 }
 
-#if defined(__AVX2__) && defined(__FMA__)
-float dotProductAvx2Fma(const float* a, const float* b, size_t n) {
+#if FMTUNER_RDS_HAS_AVX2_KERNEL
+FMTUNER_RDS_AVX2_TARGET float dotProductAvx2Fma(const float* a, const float* b, size_t n) {
     __m256 sumv = _mm256_setzero_ps();
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
@@ -125,6 +139,7 @@ RDSDecoder::RDSDecoder(int inputRate)
     , m_decimAccQ(0.0f)
     , m_rdsIHistPos(0)
     , m_rdsQHistPos(0)
+    , m_pilotHistPos(0)
     , m_useNeon(false)
     , m_useSse2(false)
     , m_useAvx2(false)
@@ -133,7 +148,9 @@ RDSDecoder::RDSDecoder(int inputRate)
     , m_samplePhase(0)
     , m_symbolPhase(0)
     , m_phaseWindowCount(0)
-    , m_agc(1e-3f)
+    , m_rdsAgc(1e-3f)
+    , m_rdsAgcAttack(0.995f)
+    , m_rdsAgcRelease(0.9995f)
     , m_prevRawBit(0)
     , m_shiftReg(0)
     , m_sync(0)
@@ -143,12 +160,21 @@ RDSDecoder::RDSDecoder(int inputRate)
     , m_rdsLocked(false)
     , m_goodGroupRun(0)
     , m_badGroupRun(0)
-    , m_samplesSinceGoodGroup(0) {
+    , m_samplesSinceGoodGroup(0)
+    , m_lockAcquireGroups(2)
+    , m_lockLossGroups(12)
+    , m_aggressiveness(Aggressiveness::Balanced) {
     m_rdsTaps = designLowPass(2400.0, 2400.0, static_cast<double>(m_baseRate));
     m_rdsTapsRev = m_rdsTaps;
     std::reverse(m_rdsTapsRev.begin(), m_rdsTapsRev.end());
     m_rdsIHistory.assign(m_rdsTapsRev.size() * 2, 0.0f);
     m_rdsQHistory.assign(m_rdsTapsRev.size() * 2, 0.0f);
+
+    // Pilot bandpass filter widened for stronger lock robustness on noisy/weak RTL frontends.
+    m_pilotTaps = designBandPass(18000.0, 20000.0, 2000.0, static_cast<double>(m_inputRate));
+    m_pilotTapsRev = m_pilotTaps;
+    std::reverse(m_pilotTapsRev.begin(), m_pilotTapsRev.end());
+    m_pilotHistory.assign(m_pilotTapsRev.size() * 2, 0.0f);
 
     m_pllFreq = 2.0f * kPi * 19000.0f / static_cast<float>(m_inputRate);
     m_pllMinFreq = 2.0f * kPi * 18750.0f / static_cast<float>(m_inputRate);
@@ -178,7 +204,7 @@ void RDSDecoder::reset() {
     m_symbolPhase = 0;
     std::fill(std::begin(m_phaseEnergy), std::end(m_phaseEnergy), 0.0f);
     m_phaseWindowCount = 0;
-    m_agc = 1e-3f;
+    m_rdsAgc = 1e-3f;
     m_prevRawBit = 0;
 
     m_shiftReg = 0;
@@ -188,6 +214,7 @@ void RDSDecoder::reset() {
     m_contGroup = 0;
     std::memset(m_blocks, 0, sizeof(m_blocks));
     std::memset(m_blockAvail, 0, sizeof(m_blockAvail));
+    std::memset(m_blockErrors, 3, sizeof(m_blockErrors));
     m_rdsLocked = false;
     m_goodGroupRun = 0;
     m_badGroupRun = 0;
@@ -195,6 +222,17 @@ void RDSDecoder::reset() {
 
     std::fill(m_rdsIHistory.begin(), m_rdsIHistory.end(), 0.0f);
     std::fill(m_rdsQHistory.begin(), m_rdsQHistory.end(), 0.0f);
+    std::fill(m_pilotHistory.begin(), m_pilotHistory.end(), 0.0f);
+}
+
+void RDSDecoder::setLockThresholds(int acquireGroups, int lossGroups) {
+    m_lockAcquireGroups = std::clamp(acquireGroups, 1, 16);
+    m_lockLossGroups = std::clamp(lossGroups, 1, 64);
+}
+
+void RDSDecoder::setAgcCoefficients(float attack, float release) {
+    m_rdsAgcAttack = std::clamp(attack, 0.90f, 0.99995f);
+    m_rdsAgcRelease = std::clamp(release, 0.90f, 0.99999f);
 }
 
 void RDSDecoder::process(const float* mpx, size_t numSamples, const std::function<void(const RDSGroup&)>& onGroup) {
@@ -213,8 +251,8 @@ void RDSDecoder::process(const float* mpx, size_t numSamples, const std::functio
     for (size_t i = 0; i < numSamples; i++) {
         const float x = mpx[i];
 
-        // Lightweight PLL drive directly from MPX (avoids expensive pilot FIR in audio thread).
-        const float pilot = x;
+        // PLL driven from pilot-filtered MPX for better lock in noise.
+        const float pilot = filterSample(x, m_pilotTapsRev, m_pilotHistory, m_pilotHistPos);
         const float vcoI = std::cos(m_pllPhase);
         const float vcoQ = std::sin(m_pllPhase);
         const float error = pilot * vcoQ;
@@ -255,8 +293,9 @@ void RDSDecoder::process(const float* mpx, size_t numSamples, const std::functio
         const float iVal = m_iBuf[i0] + ((m_iBuf[i1] - m_iBuf[i0]) * frac);
         const float qVal = m_qBuf[i0] + ((m_qBuf[i1] - m_qBuf[i0]) * frac);
         const float mag = std::sqrt((iVal * iVal) + (qVal * qVal));
-        m_agc = (m_agc * 0.9995f) + (mag * 0.0005f);
-        const float normI = iVal / std::max(m_agc, 1e-4f);
+        const float agcCoeff = (mag > m_rdsAgc) ? m_rdsAgcAttack : m_rdsAgcRelease;
+        m_rdsAgc = (m_rdsAgc * agcCoeff) + (mag * (1.0f - agcCoeff));
+        const float normI = iVal / std::max(m_rdsAgc, 1e-4f);
 
         m_phaseEnergy[m_samplePhase] = (m_phaseEnergy[m_samplePhase] * 0.995f) + (std::abs(normI) * 0.005f);
         m_samplePhase = (m_samplePhase + 1) % kRdsSps;
@@ -317,9 +356,14 @@ void RDSDecoder::processBit(uint8_t bit, const std::function<void(const RDSGroup
         type = static_cast<BlockType>((static_cast<int>(m_lastType) + 1) % BLOCK_TYPE_COUNT);
     }
 
-    bool recovered = false;
-    m_blocks[type] = correctErrors(m_shiftReg, type, recovered);
-    m_blockAvail[type] = recovered;
+    uint8_t errorLevel = 3;
+    m_blocks[type] = correctErrors(m_shiftReg, type, errorLevel);
+    if (!known && errorLevel < 3) {
+        // Inferred block type is less trustworthy than a syndrome-matched one.
+        errorLevel = std::max<uint8_t>(errorLevel, 2);
+    }
+    m_blockErrors[type] = errorLevel;
+    m_blockAvail[type] = (errorLevel < 3);
 
     if (type == BLOCK_TYPE_A) {
         // Reset group tracking on block A.
@@ -342,31 +386,39 @@ void RDSDecoder::processBit(uint8_t bit, const std::function<void(const RDSGroup
         const uint16_t d = static_cast<uint16_t>((m_blocks[BLOCK_TYPE_D] >> 10) & 0xFFFFu);
         const bool cValid = m_blockAvail[BLOCK_TYPE_C] || m_blockAvail[BLOCK_TYPE_CP];
         const bool goodGroup = m_blockAvail[BLOCK_TYPE_A] && m_blockAvail[BLOCK_TYPE_B] && cValid && m_blockAvail[BLOCK_TYPE_D];
+        int acquireNeed = m_lockAcquireGroups;
+        int lossNeed = m_lockLossGroups;
+        if (m_aggressiveness == Aggressiveness::Strict) {
+            acquireNeed = 5;
+            lossNeed = 5;
+        } else if (m_aggressiveness == Aggressiveness::Loose) {
+            acquireNeed = 2;
+            lossNeed = 12;
+        }
 
         if (goodGroup) {
             m_samplesSinceGoodGroup = 0;
-            m_goodGroupRun = std::min(m_goodGroupRun + 1, kLockAcquireGroups * 2);
+            m_goodGroupRun = std::min(m_goodGroupRun + 1, acquireNeed * 2);
             m_badGroupRun = 0;
-            if (!m_rdsLocked && m_goodGroupRun >= kLockAcquireGroups) {
+            if (!m_rdsLocked && m_goodGroupRun >= acquireNeed) {
                 m_rdsLocked = true;
             }
         } else {
-            m_badGroupRun = std::min(m_badGroupRun + 1, kLockLossGroups * 2);
+            m_badGroupRun = std::min(m_badGroupRun + 1, lossNeed * 2);
             if (m_goodGroupRun > 0) {
                 m_goodGroupRun--;
             }
-            if (m_rdsLocked && m_badGroupRun >= kLockLossGroups) {
+            if (m_rdsLocked && m_badGroupRun >= lossNeed) {
                 m_rdsLocked = false;
             }
         }
 
-        const uint8_t ea = m_blockAvail[BLOCK_TYPE_A] ? 0 : 3;
-        const uint8_t eb = m_blockAvail[BLOCK_TYPE_B] ? 0 : 3;
-        const uint8_t ec = (useCp ? m_blockAvail[BLOCK_TYPE_CP] : m_blockAvail[BLOCK_TYPE_C]) ? 0 : 3;
-        const uint8_t ed = m_blockAvail[BLOCK_TYPE_D] ? 0 : 3;
+        const uint8_t ea = m_blockErrors[BLOCK_TYPE_A];
+        const uint8_t eb = m_blockErrors[BLOCK_TYPE_B];
+        const uint8_t ec = useCp ? m_blockErrors[BLOCK_TYPE_CP] : m_blockErrors[BLOCK_TYPE_C];
+        const uint8_t ed = m_blockErrors[BLOCK_TYPE_D];
         const uint8_t errors = static_cast<uint8_t>((ea << 6) | (eb << 4) | (ec << 2) | ed);
 
-        // Keep group output continuous for clients; debounce is only for internal lock state.
         if (onGroup) {
             onGroup(RDSGroup{a, b, c, d, errors});
         }
@@ -388,10 +440,11 @@ uint16_t RDSDecoder::calcSyndrome(uint32_t block) const {
     return syn;
 }
 
-uint32_t RDSDecoder::correctErrors(uint32_t block, BlockType type, bool& recovered) const {
-    block ^= static_cast<uint32_t>(kOffsets[static_cast<size_t>(type)]);
-    uint32_t out = block;
-    uint16_t syn = calcSyndrome(block);
+uint32_t RDSDecoder::correctErrors(uint32_t block, BlockType type, uint8_t& errorLevel) const {
+    uint32_t raw = block ^ static_cast<uint32_t>(kOffsets[static_cast<size_t>(type)]);
+    uint32_t out = raw;
+    uint16_t syn = calcSyndrome(raw);
+    const bool hadError = (syn != 0);
 
     uint8_t errorFound = 0;
     if (syn) {
@@ -403,7 +456,12 @@ uint32_t RDSDecoder::correctErrors(uint32_t block, BlockType type, bool& recover
             syn ^= static_cast<uint16_t>(kLfsrPoly * outBit * !errorFound);
         }
     }
-    recovered = !(syn & 0b11111);
+    const bool recovered = !(syn & 0b11111);
+    if (!recovered) {
+        errorLevel = 3; // uncorrectable / unknown, let client-side parser decide.
+        return raw;
+    }
+    errorLevel = hadError ? 1 : 0; // corrected / clean.
     return out;
 }
 
@@ -426,7 +484,7 @@ float RDSDecoder::filterSample(float input, const std::vector<float>& taps, std:
     }
 #endif
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-#if defined(__AVX2__) && defined(__FMA__)
+#if FMTUNER_RDS_HAS_AVX2_KERNEL
     if (m_useAvx2) {
         return dotProductAvx2Fma(x, h, tapCount);
     }
@@ -466,6 +524,42 @@ std::vector<float> RDSDecoder::designLowPass(double cutoffHz, double transitionH
             tap *= inv;
         }
     }
+    return taps;
+}
+
+std::vector<float> RDSDecoder::designBandPass(double lowHz, double highHz, double transitionHz, double sampleRate) const {
+    const double fs = std::max(1.0, sampleRate);
+    int tapCount = static_cast<int>(std::ceil(3.8 * fs / transitionHz));
+    tapCount = std::clamp(tapCount, 31, 127);
+    if ((tapCount % 2) == 0) {
+        tapCount++;
+    }
+
+    std::vector<float> taps(static_cast<size_t>(tapCount), 0.0f);
+    const int mid = tapCount / 2;
+    double sumAbs = 0.0;
+
+    for (int n = 0; n < tapCount; n++) {
+        const int m = n - mid;
+        double h = 0.0;
+        if (m == 0) {
+            h = 2.0 * (highHz - lowHz) / fs;
+        } else {
+            const double mm = static_cast<double>(m);
+            h = (std::sin(2.0 * kPi * highHz * mm / fs) - std::sin(2.0 * kPi * lowHz * mm / fs)) / (kPi * mm);
+        }
+        h *= windowNuttall(n, tapCount);
+        taps[static_cast<size_t>(n)] = static_cast<float>(h);
+        sumAbs += std::abs(h);
+    }
+
+    if (sumAbs > 1e-12) {
+        const float norm = static_cast<float>(1.0 / sumAbs);
+        for (float& tap : taps) {
+            tap *= norm;
+        }
+    }
+
     return taps;
 }
 

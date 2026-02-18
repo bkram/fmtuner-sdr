@@ -16,6 +16,12 @@
 #include <sstream>
 #include <iomanip>
 #include <array>
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#include <immintrin.h>
+#endif
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
 
 #include "rtl_tcp_client.h"
 #include "fm_demod.h"
@@ -30,18 +36,23 @@
 static std::atomic<bool> g_running(true);
 
 namespace {
-double computeNormalizedIqPowerSum(const uint8_t* iq, size_t samples) {
-    static const std::array<float, 256> kNormSqLut = []() {
-        std::array<float, 256> lut{};
-        for (int v = 0; v < 256; v++) {
-            const float norm = (static_cast<float>(v) - 127.5f) / 127.5f;
-            lut[static_cast<size_t>(v)] = norm * norm;
-        }
-        return lut;
-    }();
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#if defined(__has_attribute)
+#if __has_attribute(target)
+#define FMTUNER_MAIN_HAS_AVX2_KERNEL 1
+#define FMTUNER_MAIN_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#elif defined(__GNUC__)
+#define FMTUNER_MAIN_HAS_AVX2_KERNEL 1
+#define FMTUNER_MAIN_AVX2_TARGET __attribute__((target("avx2,fma")))
+#endif
+#endif
+#ifndef FMTUNER_MAIN_HAS_AVX2_KERNEL
+#define FMTUNER_MAIN_HAS_AVX2_KERNEL 0
+#define FMTUNER_MAIN_AVX2_TARGET
+#endif
 
-    const float* lut = kNormSqLut.data();
-    const size_t count = samples * 2;
+double computeNormalizedIqPowerSumScalar(const uint8_t* iq, size_t count, const float* lut) {
     double powerSum = 0.0;
     size_t i = 0;
     for (; i + 4 <= count; i += 4) {
@@ -54,6 +65,91 @@ double computeNormalizedIqPowerSum(const uint8_t* iq, size_t samples) {
         powerSum += lut[iq[i]];
     }
     return powerSum;
+}
+
+#if FMTUNER_MAIN_HAS_AVX2_KERNEL
+FMTUNER_MAIN_AVX2_TARGET double computeNormalizedIqPowerSumAvx2(const uint8_t* iq, size_t count, const float* lut) {
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        const __m128i b8 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(iq + i));
+        const __m256i idx = _mm256_cvtepu8_epi32(b8);
+        const __m256 vals = _mm256_i32gather_ps(lut, idx, 4);
+        acc = _mm256_add_ps(acc, vals);
+    }
+    alignas(32) float lanes[8];
+    _mm256_store_ps(lanes, acc);
+    double powerSum = lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] + lanes[5] + lanes[6] + lanes[7];
+    for (; i < count; i++) {
+        powerSum += lut[iq[i]];
+    }
+    return powerSum;
+}
+#endif
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64)
+double computeNormalizedIqPowerSumNeon(const uint8_t* iq, size_t count) {
+    const float32x4_t vMid = vdupq_n_f32(127.0f);
+    const float32x4_t vInv = vdupq_n_f32(1.0f / 127.5f);
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    size_t i = 0;
+    for (; i + 16 <= count; i += 16) {
+        const uint8x16_t v = vld1q_u8(iq + i);
+        const uint16x8_t lo16 = vmovl_u8(vget_low_u8(v));
+        const uint16x8_t hi16 = vmovl_u8(vget_high_u8(v));
+        const uint32x4_t lo32a = vmovl_u16(vget_low_u16(lo16));
+        const uint32x4_t lo32b = vmovl_u16(vget_high_u16(lo16));
+        const uint32x4_t hi32a = vmovl_u16(vget_low_u16(hi16));
+        const uint32x4_t hi32b = vmovl_u16(vget_high_u16(hi16));
+        float32x4_t f0 = vcvtq_f32_u32(lo32a);
+        float32x4_t f1 = vcvtq_f32_u32(lo32b);
+        float32x4_t f2 = vcvtq_f32_u32(hi32a);
+        float32x4_t f3 = vcvtq_f32_u32(hi32b);
+        f0 = vmulq_f32(vsubq_f32(f0, vMid), vInv);
+        f1 = vmulq_f32(vsubq_f32(f1, vMid), vInv);
+        f2 = vmulq_f32(vsubq_f32(f2, vMid), vInv);
+        f3 = vmulq_f32(vsubq_f32(f3, vMid), vInv);
+        acc = vaddq_f32(acc, vmulq_f32(f0, f0));
+        acc = vaddq_f32(acc, vmulq_f32(f1, f1));
+        acc = vaddq_f32(acc, vmulq_f32(f2, f2));
+        acc = vaddq_f32(acc, vmulq_f32(f3, f3));
+    }
+#if defined(__aarch64__)
+    double powerSum = static_cast<double>(vaddvq_f32(acc));
+#else
+    float tmp[4];
+    vst1q_f32(tmp, acc);
+    double powerSum = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+#endif
+    for (; i < count; i++) {
+        const float norm = (static_cast<float>(iq[i]) - 127.0f) * (1.0f / 127.5f);
+        powerSum += static_cast<double>(norm * norm);
+    }
+    return powerSum;
+}
+#endif
+
+double computeNormalizedIqPowerSum(const uint8_t* iq, size_t samples) {
+    static const std::array<float, 256> kNormSqLut = []() {
+        std::array<float, 256> lut{};
+        for (int v = 0; v < 256; v++) {
+            const float norm = (static_cast<float>(v) - 127.0f) / 127.5f;
+            lut[static_cast<size_t>(v)] = norm * norm;
+        }
+        return lut;
+    }();
+    const size_t count = samples * 2;
+    static const CPUFeatures cpu = detectCPUFeatures();
+#if FMTUNER_MAIN_HAS_AVX2_KERNEL
+    if (cpu.avx2 && cpu.fma) {
+        return computeNormalizedIqPowerSumAvx2(iq, count, kNormSqLut.data());
+    }
+#endif
+#if defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64)
+    if (cpu.neon) {
+        return computeNormalizedIqPowerSumNeon(iq, count);
+    }
+#endif
+    return computeNormalizedIqPowerSumScalar(iq, count, kNormSqLut.data());
 }
 }  // namespace
 
@@ -69,6 +165,7 @@ void printUsage(const char* prog) {
               << "  -f, --freq <khz>      Frequency in kHz (default: 88600)\n"
               << "  -g, --gain <db>       RTL-SDR gain in dB (default: auto)\n"
               << "  -w, --wav <file>      Output WAV file\n"
+              << "  -i, --iq <file>       Capture raw IQ bytes to file\n"
               << "  -s, --audio           Enable audio output\n"
               << "  -P, --password <pwd>   XDR server password\n"
               << "  -G, --guest            Enable guest mode (no password required)\n"
@@ -116,7 +213,10 @@ int main(int argc, char* argv[]) {
     }
     if (verboseLogging) {
         std::cout << "[Config] audio.device='" << config.audio.device << "'\n";
+        std::cout << "[Config] audio.underflow_fade_ms=" << config.audio.underflow_fade_ms << "\n";
+        std::cout << "[Config] audio.click_suppressor=" << (config.audio.click_suppressor ? "true" : "false") << "\n";
         std::cout << "[Config] processing.demodulator='" << config.processing.demodulator << "'\n";
+        std::cout << "[Config] processing.stereo_blend='" << config.processing.stereo_blend << "'\n";
     }
     if (config.audio.output_rate != OUTPUT_RATE ||
         config.audio.buffer_size != AudioOutput::FRAMES_PER_BUFFER) {
@@ -124,13 +224,20 @@ int main(int argc, char* argv[]) {
                   << OUTPUT_RATE << "/" << AudioOutput::FRAMES_PER_BUFFER
                   << " in current SDR architecture; INI values are ignored\n";
     }
+    if (config.sdr.gain_strategy == "sdrpp" && config.sdr.overload_auto_gain) {
+        std::cerr << "Warning: sdr.overload_auto_gain is ignored when sdr.gain_strategy=sdrpp\n";
+    }
 
     std::string tcpHost = config.rtl_tcp.host;
     uint16_t tcpPort = config.rtl_tcp.port;
     uint32_t freqKHz = config.tuner.default_freq;
-    int gain = config.tuner.default_gain;
-    bool allowClientGainOverride = config.processing.allow_client_gain_override;
+    int gain = config.sdr.rtl_gain_db;
+    const int overloadAutoGainMaxDb = std::clamp(config.sdr.overload_auto_gain_max_db, 0, 49);
+    const bool useSdrppGainStrategy = (config.sdr.gain_strategy == "sdrpp");
+    const int defaultCustomGainFlags = config.sdr.default_custom_gain_flags;
+    bool allowClientGainOverride = config.processing.client_gain_allowed;
     std::string wavFile;
+    std::string iqFile;
     bool enableSpeaker = false;
     std::string xdrPassword = config.xdr.password;
     bool xdrGuestMode = config.xdr.guest_mode;
@@ -143,6 +250,7 @@ int main(int argc, char* argv[]) {
         {"freq", required_argument, 0, 'f'},
         {"gain", required_argument, 0, 'g'},
         {"wav", required_argument, 0, 'w'},
+        {"iq", required_argument, 0, 'i'},
         {"audio", no_argument, 0, 's'},
         {"password", required_argument, 0, 'P'},
         {"guest", no_argument, 0, 'G'},
@@ -151,7 +259,7 @@ int main(int argc, char* argv[]) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:t:f:g:w:sP:Gh", longOptions, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:t:f:g:w:i:sP:Gh", longOptions, nullptr)) != -1) {
         switch (opt) {
             case 'c':
                 configPath = optarg;
@@ -161,20 +269,50 @@ int main(int argc, char* argv[]) {
                 size_t colon = arg.find(':');
                 if (colon != std::string::npos) {
                     tcpHost = arg.substr(0, colon);
-                    tcpPort = static_cast<uint16_t>(std::stoi(arg.substr(colon + 1)));
+                    try {
+                        const int parsedPort = std::stoi(arg.substr(colon + 1));
+                        if (parsedPort < 1 || parsedPort > 65535) {
+                            std::cerr << "Invalid tcp port: " << parsedPort << "\n";
+                            return 1;
+                        }
+                        tcpPort = static_cast<uint16_t>(parsedPort);
+                    } catch (...) {
+                        std::cerr << "Invalid --tcp value: " << arg << "\n";
+                        return 1;
+                    }
                 } else {
                     tcpHost = arg;
                 }
                 break;
             }
-            case 'f':
-                freqKHz = std::stoi(optarg);
+            case 'f': {
+                try {
+                    const int parsedFreq = std::stoi(optarg);
+                    if (parsedFreq <= 0) {
+                        std::cerr << "Invalid frequency kHz: " << parsedFreq << "\n";
+                        return 1;
+                    }
+                    freqKHz = static_cast<uint32_t>(parsedFreq);
+                } catch (...) {
+                    std::cerr << "Invalid --freq value: " << optarg << "\n";
+                    return 1;
+                }
                 break;
-            case 'g':
-                gain = std::stoi(optarg);
+            }
+            case 'g': {
+                try {
+                    gain = std::stoi(optarg);
+                } catch (...) {
+                    std::cerr << "Invalid --gain value: " << optarg << "\n";
+                    return 1;
+                }
                 break;
+            }
             case 'w':
                 wavFile = optarg;
+                break;
+            case 'i':
+                iqFile = optarg;
                 break;
             case 's':
                 enableSpeaker = true;
@@ -194,8 +332,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (wavFile.empty() && !enableSpeaker) {
-        std::cerr << "Error: must specify -w (wav file) or -s (audio)\n";
+    if (wavFile.empty() && iqFile.empty() && !enableSpeaker) {
+        std::cerr << "Error: must specify at least one output: -w (wav), -i (iq), or -s (audio)\n";
         printUsage(argv[0]);
         return 1;
     }
@@ -206,7 +344,7 @@ int main(int argc, char* argv[]) {
     RTLTCPClient rtlClient(tcpHost, tcpPort);
     bool rtlConnected = false;
     std::atomic<uint32_t> requestedFrequencyHz(freqKHz * 1000);
-    std::atomic<int> requestedCustomGain(0);
+    std::atomic<int> requestedCustomGain(defaultCustomGainFlags);
     std::atomic<int> requestedAGCMode(std::clamp(config.processing.agc_mode, 0, 3));
     std::atomic<int> requestedBandwidthHz(0);
     std::atomic<int> requestedVolume(100);
@@ -235,6 +373,10 @@ int main(int argc, char* argv[]) {
         return ims;
     };
 
+    auto useOverloadAutoGain = [&]() -> bool {
+        return config.sdr.overload_auto_gain && !useSdrppGainStrategy && gain < 0 && !isImsAgcEnabled();
+    };
+
     auto calculateAppliedGainDb = [&]() -> int {
         // TEF-like AGC threshold profile approximation on RTL-SDR.
         static constexpr int kAgcToGainDb[4] = {44, 36, 30, 24}; // highest..low
@@ -250,8 +392,47 @@ int main(int argc, char* argv[]) {
         return std::clamp(gainDb, 0, 49);
     };
 
+    int dynamicGainDb = std::clamp(calculateAppliedGainDb(), 0, overloadAutoGainMaxDb);
+    int currentManualGainDb = dynamicGainDb;
+    auto effectiveAppliedGainDb = [&]() -> int {
+        if (isImsAgcEnabled()) {
+            return calculateAppliedGainDb();
+        }
+        if (useOverloadAutoGain()) {
+            return dynamicGainDb;
+        }
+        return currentManualGainDb;
+    };
+
     auto applyRtlGainAndAgc = [&](const char* reason) {
         if (!rtlConnected) {
+            return;
+        }
+        if (useSdrppGainStrategy) {
+            bool okGainMode = false;
+            bool okAgc = false;
+            bool okGain = true;
+            if (gain >= 0) {
+                okGainMode = rtlClient.setGainMode(true);
+                okGain = rtlClient.setGain(static_cast<uint32_t>(std::clamp(gain, 0, 49) * 10));
+            } else {
+                okGainMode = rtlClient.setGainMode(false);
+            }
+            okAgc = rtlClient.setAGC(config.sdr.sdrpp_rtl_agc);
+            if (verboseLogging) {
+                std::cout << "[RTL] " << reason
+                          << " strategy=sdrpp"
+                          << " tuner_agc=" << ((gain < 0) ? 1 : 0)
+                          << " rtl_agc=" << (config.sdr.sdrpp_rtl_agc ? 1 : 0)
+                          << " manual_gain=" << ((gain >= 0) ? std::clamp(gain, 0, 49) : -1)
+                          << " dB\n";
+            }
+            if (!okGainMode || !okAgc || !okGain) {
+                std::cerr << "[RTL] warning: sdrpp gain/apply command failed"
+                          << " setGainMode=" << (okGainMode ? 1 : 0)
+                          << " setAGC=" << (okAgc ? 1 : 0)
+                          << " setGain=" << (okGain ? 1 : 0) << "\n";
+            }
             return;
         }
         const int agcMode = std::clamp(requestedAGCMode.load(), 0, 3);
@@ -259,7 +440,10 @@ int main(int argc, char* argv[]) {
         const int rf = ((custom / 10) % 10) ? 1 : 0;
         const int ifv = (custom % 10) ? 1 : 0;
         const bool imsAgc = isImsAgcEnabled();
-        const int gainDb = calculateAppliedGainDb();
+        int gainDb = calculateAppliedGainDb();
+        if (useOverloadAutoGain()) {
+            gainDb = dynamicGainDb;
+        }
 
         bool okGainMode = false;
         bool okAgc = false;
@@ -273,6 +457,7 @@ int main(int argc, char* argv[]) {
             okGainMode = rtlClient.setGainMode(true);
             okAgc = rtlClient.setAGC(false);
             okGain = rtlClient.setGain(static_cast<uint32_t>(gainDb * 10));
+            currentManualGainDb = gainDb;
         }
 
         if (verboseLogging) {
@@ -333,24 +518,39 @@ int main(int argc, char* argv[]) {
         }
     }
     StereoDecoder stereo(INPUT_RATE, OUTPUT_RATE);
+    {
+        std::string blendMode = config.processing.stereo_blend;
+        std::transform(blendMode.begin(), blendMode.end(), blendMode.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (blendMode == "soft") {
+            stereo.setBlendMode(StereoDecoder::BlendMode::Soft);
+        } else if (blendMode == "aggressive") {
+            stereo.setBlendMode(StereoDecoder::BlendMode::Aggressive);
+        } else {
+            stereo.setBlendMode(StereoDecoder::BlendMode::Normal);
+        }
+    }
     AFPostProcessor afPost(INPUT_RATE, OUTPUT_RATE);
     int appliedBandwidthHz = requestedBandwidthHz.load();
     int appliedDeemphasis = requestedDeemphasis.load();
     bool appliedForceMono = requestedForceMono.load();
     bool appliedEffectiveForceMono = appliedForceMono;
-    float dcBlockStateL = 0.0f;
-    float dcBlockStateR = 0.0f;
-    float dcBlockPrevInL = 0.0f;
-    float dcBlockPrevInR = 0.0f;
-    constexpr float kDcBlockR = 0.996f;
+    float clickPrevOutL = 0.0f;
+    float clickPrevOutR = 0.0f;
+    constexpr float kClickDeltaLimit = 0.20f;
+    constexpr size_t kRetuneMuteSamples = static_cast<size_t>(OUTPUT_RATE / 25); // ~40 ms at 32 kHz
     float rfLevelFiltered = 0.0f;
     bool rfLevelInitialized = false;
     if (appliedDeemphasis == 0) {
         afPost.setDeemphasis(50);
+        demod.setDeemphasis(50);
     } else if (appliedDeemphasis == 1) {
         afPost.setDeemphasis(75);
+        demod.setDeemphasis(75);
     } else {
         afPost.setDeemphasis(0);
+        demod.setDeemphasis(0);
     }
     stereo.setForceMono(appliedEffectiveForceMono);
     demod.setBandwidthHz(appliedBandwidthHz);
@@ -364,14 +564,38 @@ int main(int argc, char* argv[]) {
         rtlClient.disconnect();
         return 1;
     }
+    audioOut.setUnderflowFadeMs(config.audio.underflow_fade_ms);
+    audioOut.setVolumePercent(requestedVolume.load());
     if (verboseLogging) {
         std::cerr << "Audio output initialized" << std::endl;
     }
 
+    FILE* iqHandle = nullptr;
+    if (!iqFile.empty()) {
+        iqHandle = std::fopen(iqFile.c_str(), "wb");
+        if (!iqHandle) {
+            std::cerr << "Failed to open IQ output file: " << iqFile << "\n";
+            audioOut.shutdown();
+            rtlClient.disconnect();
+            return 1;
+        }
+        if (verboseLogging) {
+            std::cout << "[IQ] capture enabled: " << iqFile << "\n";
+        }
+    }
+    auto writeIqCapture = [&](const uint8_t* data, size_t sampleCount) {
+        if (!iqHandle || !data || sampleCount == 0) {
+            return;
+        }
+        (void)std::fwrite(data, 1, sampleCount * 2, iqHandle);
+    };
+
     std::atomic<bool> tunerActive(false);
+    const bool autoStartForIqCapture = !iqFile.empty();
 
     XDRServer xdrServer(xdrPort);
     xdrServer.setVerboseLogging(verboseLogging);
+    xdrServer.setFrequencyState(requestedFrequencyHz.load());
     if (!xdrPassword.empty()) {
         xdrServer.setPassword(xdrPassword);
     }
@@ -382,16 +606,23 @@ int main(int argc, char* argv[]) {
         if (verboseLogging) {
             std::cout << "Tuning to " << (freqHz / 1000) << " kHz\n";
         }
-        requestedFrequencyHz = freqHz;
-        pendingFrequency = true;
+        requestedFrequencyHz.store(freqHz, std::memory_order_relaxed);
+        pendingFrequency.store(true, std::memory_order_release);
     });
     xdrServer.setVolumeCallback([&](int volume) {
         requestedVolume = std::clamp(volume, 0, 100);
+        audioOut.setVolumePercent(requestedVolume.load());
     });
     xdrServer.setGainCallback([&](int newGain) -> bool {
+        if (useSdrppGainStrategy) {
+            if (verboseLogging) {
+                std::cout << "[XDR] G command ignored (gain_strategy=sdrpp)\n";
+            }
+            return false;
+        }
         if (!allowClientGainOverride) {
             if (verboseLogging) {
-                std::cout << "[XDR] G command ignored (allow_client_gain_override=false)\n";
+                std::cout << "[XDR] G command ignored (client_gain_allowed=false)\n";
             }
             return false;
         }
@@ -406,9 +637,15 @@ int main(int argc, char* argv[]) {
         return true;
     });
     xdrServer.setAGCCallback([&](int agcMode) -> bool {
+        if (useSdrppGainStrategy) {
+            if (verboseLogging) {
+                std::cout << "[XDR] A command ignored (gain_strategy=sdrpp)\n";
+            }
+            return false;
+        }
         if (!allowClientGainOverride) {
             if (verboseLogging) {
-                std::cout << "[XDR] A command ignored (allow_client_gain_override=false)\n";
+                std::cout << "[XDR] A command ignored (client_gain_allowed=false)\n";
             }
             return false;
         }
@@ -457,6 +694,17 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to start XDR server\n";
     }
 
+    if (autoStartForIqCapture) {
+        if (verboseLogging) {
+            std::cout << "[IQ] auto-starting tuner for IQ capture mode\n";
+        }
+        connectTuner();
+        tunerActive = rtlConnected;
+        if (!rtlConnected) {
+            std::cerr << "[IQ] warning: auto-start requested but rtl_tcp connect failed\n";
+        }
+    }
+
     std::atomic<bool> rdsStop(false);
     std::atomic<bool> rdsReset(false);
     std::mutex rdsQueueMutex;
@@ -485,6 +733,26 @@ int main(int argc, char* argv[]) {
 
     std::thread rdsThread([&]() {
         RDSDecoder rds(INPUT_RATE);
+        std::string rdsAggressiveness = config.rds.aggressiveness;
+        std::transform(rdsAggressiveness.begin(), rdsAggressiveness.end(), rdsAggressiveness.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (rdsAggressiveness == "strict") {
+            rds.setAggressiveness(RDSDecoder::Aggressiveness::Strict);
+        } else if (rdsAggressiveness == "loose") {
+            rds.setAggressiveness(RDSDecoder::Aggressiveness::Loose);
+        } else {
+            rds.setAggressiveness(RDSDecoder::Aggressiveness::Balanced);
+        }
+        rds.setAgcCoefficients(config.rds.agc_attack, config.rds.agc_release);
+        rds.setLockThresholds(config.rds.lock_acquire_groups, config.rds.lock_loss_groups);
+        if (verboseLogging) {
+            std::cout << "[RDS] agc_attack=" << config.rds.agc_attack
+                      << " agc_release=" << config.rds.agc_release
+                      << " lock_acquire_groups=" << config.rds.lock_acquire_groups
+                      << " lock_loss_groups=" << config.rds.lock_loss_groups
+                      << "\n";
+        }
         while (!rdsStop.load()) {
             std::vector<float> block;
             bool doReset = false;
@@ -524,25 +792,43 @@ int main(int argc, char* argv[]) {
     }
 
     const size_t BUF_SAMPLES = 8192;
-    uint8_t* iqBuffer = new uint8_t[BUF_SAMPLES * 2];
-    float* demodBuffer = new float[BUF_SAMPLES];
-    float* stereoLeft = new float[BUF_SAMPLES];
-    float* stereoRight = new float[BUF_SAMPLES];
-    float* audioLeft = new float[BUF_SAMPLES];
-    float* audioRight = new float[BUF_SAMPLES];
+    std::vector<uint8_t> iqBufferStorage(BUF_SAMPLES * 2, 0);
+    std::vector<float> demodBufferStorage(BUF_SAMPLES, 0.0f);
+    std::vector<float> stereoLeftStorage(BUF_SAMPLES, 0.0f);
+    std::vector<float> stereoRightStorage(BUF_SAMPLES, 0.0f);
+    std::vector<float> audioLeftStorage(BUF_SAMPLES, 0.0f);
+    std::vector<float> audioRightStorage(BUF_SAMPLES, 0.0f);
+    uint8_t* iqBuffer = iqBufferStorage.data();
+    float* demodBuffer = demodBufferStorage.data();
+    float* stereoLeft = stereoLeftStorage.data();
+    float* stereoRight = stereoRightStorage.data();
+    float* audioLeft = audioLeftStorage.data();
+    float* audioRight = audioRightStorage.data();
+    size_t retuneMuteSamplesRemaining = 0;
+    size_t retuneMuteTotalSamples = 0;
 
     int consecutiveReadFailures = 0;
     bool scanActive = false;
+    auto lastGainDown = std::chrono::steady_clock::now() - std::chrono::seconds(5);
+    auto lastGainUp = std::chrono::steady_clock::now() - std::chrono::seconds(5);
     XDRServer::ScanConfig scanConfig;
     uint32_t scanRestoreFreqHz = requestedFrequencyHz.load();
     int scanRestoreBandwidthHz = appliedBandwidthHz;
     auto restoreAfterScan = [&]() {
         requestedBandwidthHz = scanRestoreBandwidthHz;
         pendingBandwidth = true;
-        rtlClient.setFrequency(scanRestoreFreqHz);
-        requestedFrequencyHz = scanRestoreFreqHz;
+        requestedFrequencyHz.store(scanRestoreFreqHz, std::memory_order_relaxed);
+        pendingFrequency.store(true, std::memory_order_release);
+        if (rtlConnected) {
+            rtlClient.setFrequency(scanRestoreFreqHz);
+        }
+        demod.reset();
         stereo.reset();
         afPost.reset();
+        clickPrevOutL = 0.0f;
+        clickPrevOutR = 0.0f;
+        retuneMuteSamplesRemaining = kRetuneMuteSamples;
+        retuneMuteTotalSamples = kRetuneMuteSamples;
         rdsReset = true;
         {
             std::lock_guard<std::mutex> lock(rdsQueueMutex);
@@ -590,8 +876,13 @@ int main(int argc, char* argv[]) {
         if (rtlConnected && pendingFrequency.exchange(false)) {
             rtlClient.setFrequency(requestedFrequencyHz.load());
             // Clear pilot/stereo state on retune to avoid carrying lock across stations.
+            demod.reset();
             stereo.reset();
             afPost.reset();
+            clickPrevOutL = 0.0f;
+            clickPrevOutR = 0.0f;
+            retuneMuteSamplesRemaining = kRetuneMuteSamples;
+            retuneMuteTotalSamples = kRetuneMuteSamples;
             rdsReset = true;
             {
                 std::lock_guard<std::mutex> lock(rdsQueueMutex);
@@ -603,6 +894,10 @@ int main(int argc, char* argv[]) {
         const bool agcChanged = pendingAGC.exchange(false);
         const bool bandwidthChanged = pendingBandwidth.exchange(false);
         if (rtlConnected && (gainChanged || agcChanged)) {
+            if (useOverloadAutoGain()) {
+                dynamicGainDb = std::clamp(calculateAppliedGainDb(), 0, overloadAutoGainMaxDb);
+                currentManualGainDb = dynamicGainDb;
+            }
             applyRtlGainAndAgc((gainChanged && agcChanged) ? "runtime/update(A+G)"
                                                            : (agcChanged ? "runtime/update(A)"
                                                                          : "runtime/update(G)"));
@@ -634,23 +929,34 @@ int main(int argc, char* argv[]) {
 
                 rtlClient.setFrequency(static_cast<uint32_t>(f) * 1000U);
 
-                size_t samples = 0;
-                for (int retries = 0; retries < 4 && samples == 0; retries++) {
-                    samples = rtlClient.readIQ(iqBuffer, BUF_SAMPLES);
-                    if (samples == 0) {
-                        usleep(5000);
+                double powerAccum = 0.0;
+                int validReads = 0;
+                for (int avg = 0; avg < 3; avg++) {
+                    size_t samples = 0;
+                    for (int retries = 0; retries < 2 && samples == 0; retries++) {
+                        samples = rtlClient.readIQ(iqBuffer, BUF_SAMPLES);
+                        if (samples == 0) {
+                            usleep(5000);
+                        }
+                    }
+                    if (samples > 0) {
+                        writeIqCapture(iqBuffer, samples);
+                        const double powerSum = computeNormalizedIqPowerSum(iqBuffer, samples);
+                        powerAccum += powerSum / static_cast<double>(samples * 2);
+                        validReads++;
                     }
                 }
-                if (samples == 0) {
+                if (validReads == 0) {
                     continue;
                 }
-
-                const double powerSum = computeNormalizedIqPowerSum(iqBuffer, samples);
-                const double avgPower = powerSum / static_cast<double>(samples);
+                const double avgPower = powerAccum / static_cast<double>(validReads);
                 const double dbfs = 10.0 * std::log10(avgPower + 1e-12);
-                const double gainCompDb = isImsAgcEnabled() ? 0.0 : static_cast<double>(calculateAppliedGainDb());
+                const double gainCompDb = static_cast<double>(effectiveAppliedGainDb());
                 const double compensatedDbfs = dbfs - gainCompDb;
-                const float rfLevel = std::clamp(static_cast<float>((compensatedDbfs + 72.0) * 1.8), 0.0f, 90.0f);
+                const double kRfFloorDbfs = config.sdr.signal_floor_dbfs;
+                const double kRfCeilDbfs = std::max(config.sdr.signal_ceil_dbfs, kRfFloorDbfs + 1.0);
+                const double norm = (compensatedDbfs - kRfFloorDbfs) / (kRfCeilDbfs - kRfFloorDbfs);
+                const float rfLevel = std::clamp(static_cast<float>(norm * 90.0), 0.0f, 90.0f);
 
                 if (!firstPoint) {
                     scanLine << ",";
@@ -674,10 +980,13 @@ int main(int argc, char* argv[]) {
         if (targetDeemphasis != appliedDeemphasis) {
             if (targetDeemphasis == 0) {
                 afPost.setDeemphasis(50);
+                demod.setDeemphasis(50);
             } else if (targetDeemphasis == 1) {
                 afPost.setDeemphasis(75);
+                demod.setDeemphasis(75);
             } else {
                 afPost.setDeemphasis(0);
+                demod.setDeemphasis(0);
             }
             appliedDeemphasis = targetDeemphasis;
         }
@@ -699,21 +1008,111 @@ int main(int argc, char* argv[]) {
             usleep(10000);
             continue;
         }
+        writeIqCapture(iqBuffer, samples);
+        if (verboseLogging && samples < BUF_SAMPLES) {
+            static uint32_t shortIqReadCount = 0;
+            const uint32_t count = ++shortIqReadCount;
+            if (count <= 5 || (count % 50) == 0) {
+                std::cerr << "[RTL] short IQ read (" << count << "): "
+                          << samples << "/" << BUF_SAMPLES << " samples\n";
+            }
+        }
         consecutiveReadFailures = 0;
 
         // RF-domain strength estimate from raw IQ power before demodulation.
         const double powerSum = computeNormalizedIqPowerSum(iqBuffer, samples);
-        const double avgPower = (samples > 0) ? (powerSum / static_cast<double>(samples)) : 0.0;
+        const double avgPower = (samples > 0) ? (powerSum / static_cast<double>(samples * 2)) : 0.0;
         const double dbfs = 10.0 * std::log10(avgPower + 1e-12);
-        // Compensate by configured RTL gain so RF level is less "always high".
-        const double gainCompDb = isImsAgcEnabled() ? 0.0 : static_cast<double>(calculateAppliedGainDb());
+        size_t hardClippedCount = 0;
+        size_t nearClippedCount = 0;
+        const size_t iqCount = samples * 2;
+        for (size_t i = 0; i < iqCount; i++) {
+            const uint8_t v = iqBuffer[i];
+            if (v <= 1 || v >= 254) {
+                hardClippedCount++;
+            }
+            // Near-rail detector is more useful with RTL 8-bit samples than hard 0/255 hits only.
+            if (v <= 8 || v >= 247) {
+                nearClippedCount++;
+            }
+        }
+        const double hardClipRatio = (iqCount > 0) ? (static_cast<double>(hardClippedCount) / static_cast<double>(iqCount)) : 0.0;
+        const double nearClipRatio = (iqCount > 0) ? (static_cast<double>(nearClippedCount) / static_cast<double>(iqCount)) : 0.0;
+        const double clipRatio = std::max(hardClipRatio, nearClipRatio);
+        // SDR++-style dBFS strength with gain compensation based on currently applied tuner gain.
+        const double gainCompDb = static_cast<double>(effectiveAppliedGainDb());
         const double compensatedDbfs = dbfs - gainCompDb;
-        const float rfLevel = std::clamp(static_cast<float>((compensatedDbfs + 72.0) * 1.8), 0.0f, 90.0f);
+        const double kRfFloorDbfs = config.sdr.signal_floor_dbfs;
+        const double kRfCeilDbfs = std::max(config.sdr.signal_ceil_dbfs, kRfFloorDbfs + 1.0);
+        const double norm = (compensatedDbfs - kRfFloorDbfs) / (kRfCeilDbfs - kRfFloorDbfs);
+        const float rfLevel = std::clamp(static_cast<float>(norm * 90.0), 0.0f, 90.0f);
         if (!rfLevelInitialized) {
             rfLevelFiltered = rfLevel;
             rfLevelInitialized = true;
         } else {
-            rfLevelFiltered = rfLevelFiltered * 0.85f + rfLevel * 0.15f;
+            rfLevelFiltered = rfLevelFiltered * 0.70f + rfLevel * 0.30f;
+        }
+        if (rtlConnected && useOverloadAutoGain()) {
+            const auto now = std::chrono::steady_clock::now();
+            bool gainAdjusted = false;
+            int downStep = 0;
+            int downIntervalMs = 0;
+            if (clipRatio > 0.040 || dbfs > -3.0) {
+                downStep = 6;
+                downIntervalMs = 4;
+            } else if (clipRatio > 0.020 || dbfs > -6.0) {
+                downStep = 4;
+                downIntervalMs = 6;
+            } else if (clipRatio > 0.008 || dbfs > -10.0) {
+                downStep = 2;
+                downIntervalMs = 9;
+            } else if (clipRatio > 0.003 || dbfs > -13.0) {
+                downStep = 1;
+                downIntervalMs = 12;
+            }
+
+            if (downStep > 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastGainDown).count() >= downIntervalMs) {
+                const int nextGain = std::max(0, dynamicGainDb - downStep);
+                if (nextGain != dynamicGainDb) {
+                    dynamicGainDb = nextGain;
+                    gainAdjusted = true;
+                    lastGainDown = now;
+                    lastGainUp = now;
+                    if (verboseLogging) {
+                        std::ostringstream hard;
+                        hard << std::fixed << std::setprecision(4) << hardClipRatio;
+                        std::ostringstream near;
+                        near << std::fixed << std::setprecision(4) << nearClipRatio;
+                        std::ostringstream db;
+                        db << std::fixed << std::setprecision(1) << dbfs;
+                        std::cout << "[RTL] overload guard: clip=" << hard.str()
+                                  << " near=" << near.str()
+                                  << " dbfs=" << db.str()
+                                  << " step=-" << downStep
+                                  << " -> tuner_gain=" << dynamicGainDb << " dB\n";
+                    }
+                }
+            } else if (nearClipRatio < 0.0010 && dbfs < -24.0 &&
+                       std::chrono::duration_cast<std::chrono::milliseconds>(now - lastGainUp).count() >= 180) {
+                const int nextGain = std::min(overloadAutoGainMaxDb, dynamicGainDb + 1);
+                if (nextGain != dynamicGainDb) {
+                    dynamicGainDb = nextGain;
+                    gainAdjusted = true;
+                    lastGainUp = now;
+                    if (verboseLogging) {
+                        std::cout << "[RTL] overload guard recover -> tuner_gain=" << dynamicGainDb << " dB\n";
+                    }
+                }
+            }
+
+            if (gainAdjusted && dynamicGainDb != currentManualGainDb) {
+                if (!rtlClient.setGain(static_cast<uint32_t>(dynamicGainDb * 10)) && verboseLogging) {
+                    std::cerr << "[RTL] overload guard: setGain failed\n";
+                } else {
+                    currentManualGainDb = dynamicGainDb;
+                }
+            }
         }
         const bool effectiveForceMono = targetForceMono;
         if (effectiveForceMono != appliedEffectiveForceMono) {
@@ -721,39 +1120,83 @@ int main(int argc, char* argv[]) {
             appliedEffectiveForceMono = effectiveForceMono;
         }
 
-        demod.processNoDownsample(iqBuffer, demodBuffer, samples);
-        queueRdsBlock(demodBuffer, samples);
-        const size_t stereoSamples = stereo.processAudio(demodBuffer, stereoLeft, stereoRight, samples);
-        const size_t outSamples = afPost.process(stereoLeft, stereoRight, stereoSamples, audioLeft, audioRight, BUF_SAMPLES);
-        xdrServer.updateSignal(rfLevelFiltered, stereo.isStereo(), effectiveForceMono, -1, -1);
-        xdrServer.updatePilot(stereo.getPilotLevelTenthsKHz());
+        size_t outSamples = 0;
+        bool stereoDetected = false;
+        int pilotTenthsKHz = 0;
+        if (!config.processing.stereo || effectiveForceMono) {
+            outSamples = demod.processSplit(iqBuffer, demodBuffer, audioLeft, samples);
+            queueRdsBlock(demodBuffer, samples);
+            for (size_t i = 0; i < outSamples; i++) {
+                const float mono = audioLeft[i] * 0.5f;
+                audioLeft[i] = mono;
+                audioRight[i] = mono;
+            }
+        } else {
+            demod.processNoDownsample(iqBuffer, demodBuffer, samples);
+            queueRdsBlock(demodBuffer, samples);
+            const size_t stereoSamples = stereo.processAudio(demodBuffer, stereoLeft, stereoRight, samples);
+            outSamples = afPost.process(stereoLeft, stereoRight, stereoSamples, audioLeft, audioRight, BUF_SAMPLES);
+            stereoDetected = stereo.isStereo();
+            pilotTenthsKHz = stereo.getPilotLevelTenthsKHz();
+        }
+        xdrServer.updateSignal(rfLevelFiltered, stereoDetected, effectiveForceMono, -1, -1);
+        xdrServer.updatePilot(pilotTenthsKHz);
 
-        // Keep small headroom to reduce hard clipping distortion at high modulation.
-        const float volumeScale = (requestedVolume.load() / 100.0f) * 0.85f;
         for (size_t i = 0; i < outSamples; i++) {
-            // 1st-order DC blocker / subsonic HPF to preserve headroom and avoid bassy clipping artifacts.
-            const float inL = audioLeft[i];
-            const float inR = audioRight[i];
-            dcBlockStateL = (inL - dcBlockPrevInL) + (kDcBlockR * dcBlockStateL);
-            dcBlockStateR = (inR - dcBlockPrevInR) + (kDcBlockR * dcBlockStateR);
-            dcBlockPrevInL = inL;
-            dcBlockPrevInR = inR;
+            float outL = std::clamp(audioLeft[i], -1.0f, 1.0f);
+            float outR = std::clamp(audioRight[i], -1.0f, 1.0f);
 
-            audioLeft[i] = std::clamp(dcBlockStateL * volumeScale, -1.0f, 1.0f);
-            audioRight[i] = std::clamp(dcBlockStateR * volumeScale, -1.0f, 1.0f);
+            if (config.audio.click_suppressor && retuneMuteSamplesRemaining > 0) {
+                const float dL = outL - clickPrevOutL;
+                if (dL > kClickDeltaLimit) {
+                    outL = clickPrevOutL + kClickDeltaLimit;
+                } else if (dL < -kClickDeltaLimit) {
+                    outL = clickPrevOutL - kClickDeltaLimit;
+                }
+                const float dR = outR - clickPrevOutR;
+                if (dR > kClickDeltaLimit) {
+                    outR = clickPrevOutR + kClickDeltaLimit;
+                } else if (dR < -kClickDeltaLimit) {
+                    outR = clickPrevOutR - kClickDeltaLimit;
+                }
+            }
+            clickPrevOutL = outL;
+            clickPrevOutR = outR;
+            audioLeft[i] = outL;
+            audioRight[i] = outR;
+        }
+
+        if (retuneMuteSamplesRemaining > 0 && outSamples > 0) {
+            const size_t muteCount = std::min(outSamples, retuneMuteSamplesRemaining);
+            const size_t alreadyMuted = (retuneMuteTotalSamples > retuneMuteSamplesRemaining)
+                ? (retuneMuteTotalSamples - retuneMuteSamplesRemaining)
+                : 0;
+            const size_t fadeSamples = std::max<size_t>(
+                1,
+                std::min(static_cast<size_t>(OUTPUT_RATE / 200), retuneMuteTotalSamples / 2)); // up to ~5 ms
+            for (size_t i = 0; i < muteCount; i++) {
+                const size_t idx = alreadyMuted + i;
+                float gain = 0.0f;
+                if (idx < fadeSamples) {
+                    gain = 1.0f - (static_cast<float>(idx) / static_cast<float>(fadeSamples));
+                } else if (idx >= (retuneMuteTotalSamples - fadeSamples)) {
+                    const size_t tail = retuneMuteTotalSamples - idx;
+                    gain = static_cast<float>(tail) / static_cast<float>(fadeSamples);
+                }
+                gain = std::clamp(gain, 0.0f, 1.0f);
+                audioLeft[i] *= gain;
+                audioRight[i] *= gain;
+            }
+            retuneMuteSamplesRemaining -= muteCount;
+            if (retuneMuteSamplesRemaining == 0) {
+                retuneMuteTotalSamples = 0;
+            }
         }
 
         if (outSamples > 0) {
             audioOut.write(audioLeft, audioRight, outSamples);
         }
     }
-
-    delete[] iqBuffer;
-    delete[] demodBuffer;
-    delete[] stereoLeft;
-    delete[] stereoRight;
-    delete[] audioLeft;
-    delete[] audioRight;
 
     rdsStop = true;
     rdsQueueCv.notify_all();
@@ -762,6 +1205,10 @@ int main(int argc, char* argv[]) {
     }
 
     audioOut.shutdown();
+    if (iqHandle) {
+        std::fclose(iqHandle);
+        iqHandle = nullptr;
+    }
     xdrServer.stop();
     rtlClient.disconnect();
 

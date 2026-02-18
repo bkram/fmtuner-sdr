@@ -6,6 +6,9 @@
 #include <string>
 #include <atomic>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #ifdef __APPLE__
 #include <portaudio.h>
@@ -16,13 +19,15 @@ public:
     static constexpr int SAMPLE_RATE = 32000;
     static constexpr int CHANNELS = 2;
     static constexpr int BITS_PER_SAMPLE = 16;
-    static constexpr int FRAMES_PER_BUFFER = 1024;
+    static constexpr int FRAMES_PER_BUFFER = 4096;
 
     AudioOutput();
     ~AudioOutput();
 
     bool init(bool enableSpeaker, const std::string& wavFile, const std::string& deviceSelector = "", bool verboseLogging = true);
     void shutdown();
+    void setVolumePercent(int volumePercent);
+    void setUnderflowFadeMs(int fadeMs);
 
     bool write(const float* left, const float* right, size_t numSamples);
     bool isRunning() const { return m_running; }
@@ -32,6 +37,7 @@ private:
     void writeWAVHeader();
     bool writeWAVData(const float* left, const float* right, size_t numSamples);
     void closeWAV();
+    void runOutputThread();
 
 #ifdef __APPLE__
     static int paCallback(const void* inputBuffer, void* outputBuffer,
@@ -50,9 +56,20 @@ private:
     std::vector<float> m_circularBuffer;
     std::atomic<int> m_writeIndex;
     std::atomic<int> m_readIndex;
+    bool m_verboseLogging;
+    std::atomic<int> m_requestedVolumePercent;
+    std::atomic<int> m_underflowFadeMs;
+    float m_currentVolumeScale;
 
 #ifdef __APPLE__
     PaStream* m_paStream;
+    bool m_portAudioInitialized;
+    std::thread m_outputThread;
+    std::atomic<bool> m_outputThreadRunning;
+    std::mutex m_outputMutex;
+    std::condition_variable m_outputCv;
+    std::vector<float> m_outputQueue;
+    size_t m_outputReadIndex;
 #endif
 };
 
