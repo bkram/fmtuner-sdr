@@ -13,16 +13,23 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install dependencies
+    - name: Install dependencies (vcpkg)
       shell: pwsh
       run: |
-        choco install openssl -y --no-progress --limit-output
-        choco install portaudio -y --no-progress --limit-output
+        if (-not $env:VCPKG_INSTALLATION_ROOT) {
+          if (Test-Path "C:\vcpkg") {
+            $env:VCPKG_INSTALLATION_ROOT = "C:\vcpkg"
+          } else {
+            throw "VCPKG_INSTALLATION_ROOT is not set and C:\vcpkg was not found."
+          }
+        }
+        & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install portaudio:x64-windows openssl:x64-windows
 
     - name: Build
       shell: pwsh
       run: |
-        cmake -S . -B build -DFM_TUNER_ENABLE_PORTAUDIO=ON
+        $toolchain = "$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
+        cmake -S . -B build -DFM_TUNER_ENABLE_PORTAUDIO=ON -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DVCPKG_TARGET_TRIPLET=x64-windows
         cmake --build build --config Release
 
     - name: Bundle runtime dependencies
@@ -32,52 +39,27 @@ jobs:
         New-Item -ItemType Directory -Force -Path $dist | Out-Null
         Copy-Item "build/Release/fm-tuner-sdr.exe" $dist -Force
 
-        $opensslBinCandidates = @(
-          "C:\Program Files\OpenSSL-Win64\bin",
-          "C:\Program Files\OpenSSL\bin"
-        )
+        $vcpkgBin = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
+        if (-not (Test-Path $vcpkgBin)) {
+          throw "vcpkg runtime bin directory not found: $vcpkgBin"
+        }
 
-        $opensslBin = $null
-        foreach ($candidate in $opensslBinCandidates) {
-          if (Test-Path (Join-Path $candidate "libssl-3-x64.dll")) {
-            $opensslBin = $candidate
+        Copy-Item (Join-Path $vcpkgBin "libssl-3-x64.dll") $dist -Force
+        Copy-Item (Join-Path $vcpkgBin "libcrypto-3-x64.dll") $dist -Force
+
+        $portaudioDllCandidates = @("portaudio.dll", "portaudio_x64.dll")
+        $portaudioFound = $false
+        foreach ($dll in $portaudioDllCandidates) {
+          $src = Join-Path $vcpkgBin $dll
+          if (Test-Path $src) {
+            Copy-Item $src $dist -Force
+            $portaudioFound = $true
             break
           }
         }
-
-        if (-not $opensslBin) {
-          throw "Could not locate OpenSSL runtime DLLs (libssl-3-x64.dll/libcrypto-3-x64.dll)."
+        if (-not $portaudioFound) {
+          throw "Could not locate PortAudio runtime DLL in $vcpkgBin"
         }
-
-        Copy-Item (Join-Path $opensslBin "libssl-3-x64.dll") $dist -Force
-        Copy-Item (Join-Path $opensslBin "libcrypto-3-x64.dll") $dist -Force
-
-        $portaudioCandidates = @(
-          "C:\ProgramData\chocolatey\lib\portaudio\tools\portaudio.dll",
-          "C:\ProgramData\chocolatey\bin\portaudio.dll",
-          "C:\Program Files\PortAudio\portaudio.dll"
-        )
-
-        $portaudioDll = $null
-        foreach ($candidate in $portaudioCandidates) {
-          if (Test-Path $candidate) {
-            $portaudioDll = $candidate
-            break
-          }
-        }
-
-        if (-not $portaudioDll) {
-          $dynamicCandidate = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib" -Recurse -File -Filter "portaudio.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($dynamicCandidate) {
-            $portaudioDll = $dynamicCandidate.FullName
-          }
-        }
-
-        if (-not $portaudioDll) {
-          throw "Could not locate portaudio.dll runtime for bundled Windows artifact."
-        }
-
-        Copy-Item $portaudioDll $dist -Force
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
