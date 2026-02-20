@@ -505,7 +505,12 @@ bool XDRServer::start() {
     }
 
     int opt = 1;
+#if defined(_WIN32)
+    setsockopt(m_serverSocket, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&opt), static_cast<int>(sizeof(opt)));
+#else
     setsockopt(m_serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
 
     struct sockaddr_in serverAddr;
     memset(&serverAddr, 0, sizeof(serverAddr));
