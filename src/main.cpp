@@ -215,8 +215,6 @@ int main(int argc, char* argv[]) {
     }
     if (verboseLogging) {
         std::cout << "[Config] audio.device='" << config.audio.device << "'\n";
-        std::cout << "[Config] audio.underflow_fade_ms=" << config.audio.underflow_fade_ms << "\n";
-        std::cout << "[Config] audio.click_suppressor=" << (config.audio.click_suppressor ? "true" : "false") << "\n";
         std::cout << "[Config] processing.demodulator='" << config.processing.demodulator << "'\n";
         std::cout << "[Config] processing.stereo_blend='" << config.processing.stereo_blend << "'\n";
     }
@@ -549,9 +547,6 @@ int main(int argc, char* argv[]) {
     int appliedDeemphasis = requestedDeemphasis.load();
     bool appliedForceMono = requestedForceMono.load();
     bool appliedEffectiveForceMono = appliedForceMono;
-    float clickPrevOutL = 0.0f;
-    float clickPrevOutR = 0.0f;
-    constexpr float kClickDeltaLimit = 0.20f;
     constexpr size_t kRetuneMuteSamples = static_cast<size_t>(OUTPUT_RATE / 25); // ~40 ms at 32 kHz
     float rfLevelFiltered = 0.0f;
     bool rfLevelInitialized = false;
@@ -578,7 +573,6 @@ int main(int argc, char* argv[]) {
         rtlClient.disconnect();
         return 1;
     }
-    audioOut.setUnderflowFadeMs(config.audio.underflow_fade_ms);
     audioOut.setVolumePercent(requestedVolume.load());
     if (verboseLogging) {
         std::cerr << "Audio output initialized" << std::endl;
@@ -839,8 +833,6 @@ int main(int argc, char* argv[]) {
         demod.reset();
         stereo.reset();
         afPost.reset();
-        clickPrevOutL = 0.0f;
-        clickPrevOutR = 0.0f;
         retuneMuteSamplesRemaining = kRetuneMuteSamples;
         retuneMuteTotalSamples = kRetuneMuteSamples;
         rdsReset = true;
@@ -893,8 +885,6 @@ int main(int argc, char* argv[]) {
             demod.reset();
             stereo.reset();
             afPost.reset();
-            clickPrevOutL = 0.0f;
-            clickPrevOutR = 0.0f;
             retuneMuteSamplesRemaining = kRetuneMuteSamples;
             retuneMuteTotalSamples = kRetuneMuteSamples;
             rdsReset = true;
@@ -1157,27 +1147,8 @@ int main(int argc, char* argv[]) {
         xdrServer.updatePilot(pilotTenthsKHz);
 
         for (size_t i = 0; i < outSamples; i++) {
-            float outL = std::clamp(audioLeft[i], -1.0f, 1.0f);
-            float outR = std::clamp(audioRight[i], -1.0f, 1.0f);
-
-            if (config.audio.click_suppressor && retuneMuteSamplesRemaining > 0) {
-                const float dL = outL - clickPrevOutL;
-                if (dL > kClickDeltaLimit) {
-                    outL = clickPrevOutL + kClickDeltaLimit;
-                } else if (dL < -kClickDeltaLimit) {
-                    outL = clickPrevOutL - kClickDeltaLimit;
-                }
-                const float dR = outR - clickPrevOutR;
-                if (dR > kClickDeltaLimit) {
-                    outR = clickPrevOutR + kClickDeltaLimit;
-                } else if (dR < -kClickDeltaLimit) {
-                    outR = clickPrevOutR - kClickDeltaLimit;
-                }
-            }
-            clickPrevOutL = outL;
-            clickPrevOutR = outR;
-            audioLeft[i] = outL;
-            audioRight[i] = outR;
+            audioLeft[i] = std::clamp(audioLeft[i], -1.0f, 1.0f);
+            audioRight[i] = std::clamp(audioRight[i], -1.0f, 1.0f);
         }
 
         if (retuneMuteSamplesRemaining > 0 && outSamples > 0) {

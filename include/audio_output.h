@@ -13,7 +13,6 @@
 #if defined(__APPLE__)
 #include <portaudio.h>
 #elif defined(__linux__)
-#include <portaudio.h>
 #if defined(FM_TUNER_HAS_ALSA)
 #include <alsa/asoundlib.h>
 #endif
@@ -32,7 +31,6 @@ public:
     bool init(bool enableSpeaker, const std::string& wavFile, const std::string& deviceSelector = "", bool verboseLogging = true);
     void shutdown();
     void setVolumePercent(int volumePercent);
-    void setUnderflowFadeMs(int fadeMs);
     static bool listDevices();
 
     bool write(const float* left, const float* right, size_t numSamples);
@@ -49,7 +47,7 @@ private:
     bool initAlsa(const std::string& deviceName);
     void shutdownAlsa();
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
     static int paCallback(const void* inputBuffer, void* outputBuffer,
                           unsigned long framesPerBuffer,
                           const PaStreamInfo* timeInfo,
@@ -68,10 +66,9 @@ private:
     std::atomic<int> m_readIndex;
     bool m_verboseLogging;
     std::atomic<int> m_requestedVolumePercent;
-    std::atomic<int> m_underflowFadeMs;
     float m_currentVolumeScale;
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
     PaStream* m_paStream;
     bool m_portAudioInitialized;
     std::thread m_outputThread;

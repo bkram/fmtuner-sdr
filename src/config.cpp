@@ -159,16 +159,6 @@ bool Config::loadFromFile(const std::string& filename) {
                 if (parseInt(value, parsed) && parsed > 0) {
                     audio.buffer_size = parsed;
                 }
-            } else if (key == "underflow_fade_ms") {
-                int parsed = 0;
-                if (parseInt(value, parsed)) {
-                    audio.underflow_fade_ms = std::clamp(parsed, 0, 50);
-                }
-            } else if (key == "click_suppressor") {
-                bool parsed = false;
-                if (parseBool(value, parsed)) {
-                    audio.click_suppressor = parsed;
-                }
             }
         } else if (section == "sdr") {
             if (key == "rtl_gain_db") {

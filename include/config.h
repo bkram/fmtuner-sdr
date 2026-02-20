@@ -14,8 +14,6 @@ struct Config {
         std::string device;
         int output_rate = 32000;
         int buffer_size = 1024;
-        int underflow_fade_ms = 5;
-        bool click_suppressor = false;
     } audio;
 
     struct SDRSection {

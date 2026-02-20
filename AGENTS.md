@@ -41,10 +41,9 @@ Manual PortAudio/OpenSSL paths (if auto-detection fails):
 cmake .. -DPORTAUDIO_INCLUDE_DIR=C:/path/to/portaudio/include -DPORTAUDIO_LIBRARY=C:/path/to/portaudio/lib/portaudio.lib
 ```
 
-AVX2/FMA is auto-enabled on x86 builds by default (`FM_TUNER_ENABLE_X86_AVX2=ON`).
-Disable with:
+AVX2/FMA is disabled by default for portable x86 binaries. Enable if target CPU has AVX2:
 ```bash
-cmake .. -DFM_TUNER_ENABLE_X86_AVX2=OFF
+cmake .. -DFM_TUNER_ENABLE_X86_AVX2=ON
 ```
 
 ## Running

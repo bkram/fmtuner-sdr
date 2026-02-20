@@ -88,11 +88,11 @@ cmake .. -DPORTAUDIO_INCLUDE_DIR=C:/path/to/portaudio/include -DPORTAUDIO_LIBRAR
 
 ### AVX2/FMA Notes
 
-- AVX2/FMA is enabled automatically on x86 builds when supported by the compiler (`FM_TUNER_ENABLE_X86_AVX2=ON` by default).
-- To disable this behavior:
+- AVX2/FMA is disabled by default for portable x86 binaries.
+- Enable if target CPU has AVX2:
 
 ```bash
-cmake .. -DFM_TUNER_ENABLE_X86_AVX2=OFF
+cmake .. -DFM_TUNER_ENABLE_X86_AVX2=ON
 ```
 
 ## Usage

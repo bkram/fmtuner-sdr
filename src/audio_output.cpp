@@ -30,7 +30,7 @@ bool parseHwDeviceGlobal(const std::string& selector, int& card, int& device) {
 }
 #endif
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
 namespace {
 std::string trim(const std::string& value) {
     size_t start = 0;
@@ -180,7 +180,7 @@ void printOutputDeviceList() {
 bool AudioOutput::listDevices() {
 #if defined(__linux__) && defined(FM_TUNER_HAS_ALSA)
     listAlsaDevices();
-#endif
+#elif defined(__APPLE__)
     PaError err = Pa_Initialize();
     if (err != paNoError) {
         std::cerr << "PortAudio init failed: " << Pa_GetErrorText(err) << std::endl;
@@ -188,6 +188,7 @@ bool AudioOutput::listDevices() {
     }
     printOutputDeviceList();
     Pa_Terminate();
+#endif
     return true;
 }
 
@@ -412,7 +413,7 @@ void AudioOutput::shutdownAlsa() {
 }
 #endif
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
 void AudioOutput::runOutputThread() {
     constexpr size_t kBlockSamples = static_cast<size_t>(FRAMES_PER_BUFFER) * CHANNELS;
     std::vector<float> block(kBlockSamples, 0.0f);
@@ -450,10 +451,10 @@ void AudioOutput::runOutputThread() {
 
             if (copied < kBlockSamples) {
                 const size_t missing = kBlockSamples - copied;
-                const int fadeMs = std::clamp(m_underflowFadeMs.load(std::memory_order_relaxed), 0, 50);
+                constexpr int kFadeMs = 5;
                 const size_t fadeSamples = std::min(
                     missing,
-                    static_cast<size_t>(SAMPLE_RATE * (static_cast<float>(fadeMs) / 1000.0f) * CHANNELS));
+                    static_cast<size_t>(SAMPLE_RATE * (static_cast<float>(kFadeMs) / 1000.0f) * CHANNELS));
                 for (size_t i = 0; i < fadeSamples; i += 2) {
                     const float t = static_cast<float>(i / 2) /
                         static_cast<float>(std::max<size_t>(1, (fadeSamples / 2) - 1));
@@ -502,9 +503,8 @@ AudioOutput::AudioOutput()
     , m_readIndex(0)
     , m_verboseLogging(true)
     , m_requestedVolumePercent(100)
-    , m_underflowFadeMs(5)
     , m_currentVolumeScale(0.85f)
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
     , m_paStream(nullptr)
     , m_portAudioInitialized(false)
     , m_outputThreadRunning(false)
@@ -535,30 +535,13 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
         }
     }
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
     if (enableSpeaker) {
         const std::string normalizedSelector = normalizeSelector(deviceSelector);
         if (verboseLogging) {
             std::cerr << "[Audio] device selector raw='" << deviceSelector
                       << "' normalized='" << normalizedSelector << "'\n";
         }
-
-#if defined(__linux__) && defined(FM_TUNER_HAS_ALSA)
-        bool usePortAudio = (normalizedSelector.size() > 3 && normalizedSelector.substr(0, 3) == "pa:");
-        std::string alsaSelector = normalizedSelector;
-        if (usePortAudio) {
-            alsaSelector = normalizedSelector.substr(3);
-        }
-        
-        if (!usePortAudio) {
-            std::string tryDevice = alsaSelector.empty() ? "default" : alsaSelector;
-            if (initAlsa(tryDevice)) {
-                m_running = true;
-                return true;
-            }
-            std::cerr << "[Audio] ALSA init failed, trying PortAudio...\n";
-        }
-#endif
 
         PaError err = Pa_Initialize();
         if (err != paNoError) {
@@ -584,7 +567,6 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
                 m_portAudioInitialized = false;
                 return false;
             }
-            // Favor stability over ultra-low latency to avoid audible underruns/clicks.
             outputParams.suggestedLatency = std::max(deviceInfo->defaultLowOutputLatency,
                                                      deviceInfo->defaultHighOutputLatency);
             outputParams.hostApiSpecificStreamInfo = nullptr;
@@ -615,7 +597,6 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
                     std::cerr << "PortAudio started successfully" << std::endl;
                 }
 
-                // Prime the output device with silence to reduce startup underruns.
                 float primeBuffer[FRAMES_PER_BUFFER * CHANNELS] = {0.0f};
                 for (int i = 0; i < 2; i++) {
                     const PaError primeErr = Pa_WriteStream(m_paStream, primeBuffer, FRAMES_PER_BUFFER);
@@ -637,6 +618,19 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
     }
 #endif
 
+#if defined(__linux__) && defined(FM_TUNER_HAS_ALSA)
+    if (enableSpeaker) {
+        std::string alsaDevice = deviceSelector.empty() ? "default" : deviceSelector;
+        if (verboseLogging) {
+            std::cerr << "[Audio] device selector: " << alsaDevice << "\n";
+        }
+        if (!initAlsa(alsaDevice)) {
+            std::cerr << "Failed to initialize ALSA audio output" << std::endl;
+            return false;
+        }
+    }
+#endif
+
     m_running = true;
     return true;
 }
@@ -648,7 +642,7 @@ void AudioOutput::shutdown() {
     shutdownAlsa();
 #endif
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
     m_outputThreadRunning = false;
     m_outputCv.notify_all();
     if (m_outputThread.joinable()) {
@@ -670,10 +664,6 @@ void AudioOutput::shutdown() {
 
 void AudioOutput::setVolumePercent(int volumePercent) {
     m_requestedVolumePercent.store(std::clamp(volumePercent, 0, 100), std::memory_order_relaxed);
-}
-
-void AudioOutput::setUnderflowFadeMs(int fadeMs) {
-    m_underflowFadeMs.store(std::clamp(fadeMs, 0, 50), std::memory_order_relaxed);
 }
 
 bool AudioOutput::initWAV(const std::string& filename) {
@@ -810,7 +800,7 @@ bool AudioOutput::write(const float* left, const float* right, size_t numSamples
     }
 #endif
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
     if (m_enableSpeaker && m_paStream) {
         std::lock_guard<std::mutex> lock(m_outputMutex);
         constexpr size_t kMaxQueuedSamples = static_cast<size_t>(SAMPLE_RATE) * CHANNELS * 2;
