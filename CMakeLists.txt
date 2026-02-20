@@ -8,64 +8,86 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 include(CheckCXXCompilerFlag)
 
 option(FM_TUNER_ENABLE_X86_AVX2 "Enable AVX2/FMA compile flags on x86 targets" ON)
+option(FM_TUNER_ENABLE_PORTAUDIO "Enable PortAudio for audio output (macOS/Windows)" OFF)
+option(FM_TUNER_ENABLE_ALSA "Enable ALSA for audio output (Linux)" OFF)
 
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
-find_package(PkgConfig QUIET)
 
-set(PORTAUDIO_INCLUDE_DIR "")
-set(PORTAUDIO_LIBRARY "")
+if(FM_TUNER_ENABLE_PORTAUDIO)
+    find_package(PkgConfig QUIET)
 
-find_path(PORTAUDIO_INCLUDE_DIR
-    NAMES portaudio.h
-    HINTS /opt/homebrew/include /usr/local/include
-)
+    set(PORTAUDIO_INCLUDE_DIR "")
+    set(PORTAUDIO_LIBRARY "")
 
-find_library(PORTAUDIO_LIBRARY
-    NAMES portaudio portaudio_static
-    HINTS /opt/homebrew/lib /usr/local/lib
-)
+    find_path(PORTAUDIO_INCLUDE_DIR
+        NAMES portaudio.h
+        HINTS /opt/homebrew/include /usr/local/include
+    )
 
-if((NOT PORTAUDIO_INCLUDE_DIR OR NOT PORTAUDIO_LIBRARY) AND PkgConfig_FOUND)
-    pkg_check_modules(PC_PORTAUDIO QUIET IMPORTED_TARGET portaudio-2.0)
-    if(PC_PORTAUDIO_FOUND)
-        if(NOT PORTAUDIO_INCLUDE_DIR)
-            set(PORTAUDIO_INCLUDE_DIR ${PC_PORTAUDIO_INCLUDE_DIRS})
-        endif()
-        if(NOT PORTAUDIO_LIBRARY)
-            if(DEFINED pkgcfg_lib_PC_PORTAUDIO_portaudio)
-                set(PORTAUDIO_LIBRARY ${pkgcfg_lib_PC_PORTAUDIO_portaudio})
+    find_library(PORTAUDIO_LIBRARY
+        NAMES portaudio portaudio_static
+        HINTS /opt/homebrew/lib /usr/local/lib
+    )
+
+    if((NOT PORTAUDIO_INCLUDE_DIR OR NOT PORTAUDIO_LIBRARY) AND PkgConfig_FOUND)
+        pkg_check_modules(PC_PORTAUDIO QUIET IMPORTED_TARGET portaudio-2.0)
+        if(PC_PORTAUDIO_FOUND)
+            if(NOT PORTAUDIO_INCLUDE_DIR)
+                set(PORTAUDIO_INCLUDE_DIR ${PC_PORTAUDIO_INCLUDE_DIRS})
+            endif()
+            if(NOT PORTAUDIO_LIBRARY)
+                if(DEFINED pkgcfg_lib_PC_PORTAUDIO_portaudio)
+                    set(PORTAUDIO_LIBRARY ${pkgcfg_lib_PC_PORTAUDIO_portaudio})
+                endif()
             endif()
         endif()
     endif()
-endif()
 
-if(APPLE AND (NOT PORTAUDIO_INCLUDE_DIR OR NOT PORTAUDIO_LIBRARY))
-    execute_process(
-        COMMAND brew --prefix portaudio
-        OUTPUT_VARIABLE PORTAUDIO_BREW_PREFIX
-        RESULT_VARIABLE PORTAUDIO_BREW_RESULT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    if(PORTAUDIO_BREW_RESULT EQUAL 0 AND PORTAUDIO_BREW_PREFIX)
-        if(NOT PORTAUDIO_INCLUDE_DIR)
-            find_path(PORTAUDIO_INCLUDE_DIR
-                NAMES portaudio.h
-                HINTS ${PORTAUDIO_BREW_PREFIX}/include
-            )
+    if(APPLE AND (NOT PORTAUDIO_INCLUDE_DIR OR NOT PORTAUDIO_LIBRARY))
+        execute_process(
+            COMMAND brew --prefix portaudio
+            OUTPUT_VARIABLE PORTAUDIO_BREW_PREFIX
+            RESULT_VARIABLE PORTAUDIO_BREW_RESULT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(PORTAUDIO_BREW_RESULT EQUAL 0 AND PORTAUDIO_BREW_PREFIX)
+            if(NOT PORTAUDIO_INCLUDE_DIR)
+                find_path(PORTAUDIO_INCLUDE_DIR
+                    NAMES portaudio.h
+                    HINTS ${PORTAUDIO_BREW_PREFIX}/include
+                )
+            endif()
+            if(NOT PORTAUDIO_LIBRARY)
+                find_library(PORTAUDIO_LIBRARY
+                    NAMES portaudio portaudio_static
+                    HINTS ${PORTAUDIO_BREW_PREFIX}/lib
+                )
+            endif()
         endif()
-        if(NOT PORTAUDIO_LIBRARY)
-            find_library(PORTAUDIO_LIBRARY
-                NAMES portaudio portaudio_static
-                HINTS ${PORTAUDIO_BREW_PREFIX}/lib
-            )
-        endif()
+    endif()
+
+    if((NOT PORTAUDIO_INCLUDE_DIR OR NOT PORTAUDIO_LIBRARY) AND NOT TARGET PkgConfig::PC_PORTAUDIO)
+        message(FATAL_ERROR "PortAudio not found. Install PortAudio or set PORTAUDIO_INCLUDE_DIR and PORTAUDIO_LIBRARY.")
     endif()
 endif()
 
-if((NOT PORTAUDIO_INCLUDE_DIR OR NOT PORTAUDIO_LIBRARY) AND NOT TARGET PkgConfig::PC_PORTAUDIO)
-    message(FATAL_ERROR "PortAudio not found. Install PortAudio or set PORTAUDIO_INCLUDE_DIR and PORTAUDIO_LIBRARY.")
+if(FM_TUNER_ENABLE_ALSA)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(PC_ALSA QUIET alsa)
+    endif()
+    if(PC_ALSA_FOUND)
+        set(ALSA_INCLUDE_DIRS ${PC_ALSA_INCLUDE_DIRS})
+        set(ALSA_LIBRARIES ${PC_ALSA_LIBRARIES})
+    else()
+        find_path(ALSA_INCLUDE_DIRS NAMES alsa/asoundlib.h)
+        find_library(ALSA_LIBRARIES NAMES asound)
+    endif()
+    if(NOT ALSA_INCLUDE_DIRS OR NOT ALSA_LIBRARIES)
+        message(FATAL_ERROR "ALSA not found. Install libasound2-dev or set ALSA_INCLUDE_DIRS and ALSA_LIBRARIES.")
+    endif()
 endif()
 
 set(SOURCES
@@ -107,7 +129,7 @@ endif()
 target_include_directories(fm-tuner-sdr PRIVATE 
     ${CMAKE_SOURCE_DIR}/include
 )
-if(PORTAUDIO_INCLUDE_DIR)
+if(FM_TUNER_ENABLE_PORTAUDIO AND PORTAUDIO_INCLUDE_DIR)
     target_include_directories(fm-tuner-sdr PRIVATE ${PORTAUDIO_INCLUDE_DIR})
 endif()
 
@@ -116,10 +138,12 @@ target_link_libraries(fm-tuner-sdr PRIVATE
     OpenSSL::Crypto
     OpenSSL::SSL
 )
-if(TARGET PkgConfig::PC_PORTAUDIO)
-    target_link_libraries(fm-tuner-sdr PRIVATE PkgConfig::PC_PORTAUDIO)
-elseif(PORTAUDIO_LIBRARY)
-    target_link_libraries(fm-tuner-sdr PRIVATE ${PORTAUDIO_LIBRARY})
+if(FM_TUNER_ENABLE_PORTAUDIO)
+    if(TARGET PkgConfig::PC_PORTAUDIO)
+        target_link_libraries(fm-tuner-sdr PRIVATE PkgConfig::PC_PORTAUDIO)
+    elseif(PORTAUDIO_LIBRARY)
+        target_link_libraries(fm-tuner-sdr PRIVATE ${PORTAUDIO_LIBRARY})
+    endif()
 endif()
 
 install(TARGETS fm-tuner-sdr DESTINATION bin)
