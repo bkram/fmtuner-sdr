@@ -18,9 +18,12 @@ jobs:
         brew install cmake pkg-config libtool
         brew install --build-from-source osmo-sdr || brew install rtlsdr
         brew install libusb
+        brew install portaudio
+        brew install openssl
 
     - name: Build
       run: |
+        export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
         mkdir -p build
         cd build
         cmake ..

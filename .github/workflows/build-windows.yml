@@ -15,7 +15,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        choco install cmake pkgconfig
+        choco install cmake pkgconfig openssl portaudio
 
     - name: Build
       shell: pwsh
