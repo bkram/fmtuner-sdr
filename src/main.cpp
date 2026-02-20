@@ -878,7 +878,7 @@ int main(int argc, char* argv[]) {
     };
     while (g_running) {
         if (!tunerActive) {
-            usleep(10000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
@@ -970,7 +970,7 @@ int main(int argc, char* argv[]) {
                     for (int retries = 0; retries < 2 && samples == 0; retries++) {
                         samples = rtlClient.readIQ(iqBuffer, BUF_SAMPLES);
                         if (samples == 0) {
-                            usleep(5000);
+                            std::this_thread::sleep_for(std::chrono::milliseconds(5));
                         }
                     }
                     if (samples > 0) {
@@ -1039,7 +1039,7 @@ int main(int argc, char* argv[]) {
                 connectTuner();
                 consecutiveReadFailures = 0;
             }
-            usleep(10000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
         writeIqCapture(iqBuffer, samples);
