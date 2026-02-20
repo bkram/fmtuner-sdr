@@ -5,6 +5,7 @@
 ### macOS
 
 Apple Silicon:
+
 ```bash
 mkdir -p build && cd build
 cmake .. -DCMAKE_OSX_ARCHITECTURE=arm64
@@ -12,6 +13,7 @@ make
 ```
 
 Intel:
+
 ```bash
 mkdir -p build && cd build
 cmake .. -DCMAKE_OSX_ARCHITECTURE=x86_64
@@ -29,6 +31,7 @@ make
 ### Windows
 
 Requires vcpkg:
+
 ```bash
 vcpkg install portaudio openssl
 mkdir -p build && cd build
@@ -37,11 +40,13 @@ make
 ```
 
 Manual PortAudio/OpenSSL paths (if auto-detection fails):
+
 ```bash
 cmake .. -DPORTAUDIO_INCLUDE_DIR=C:/path/to/portaudio/include -DPORTAUDIO_LIBRARY=C:/path/to/portaudio/lib/portaudio.lib
 ```
 
 AVX2/FMA is disabled by default for portable x86 binaries. Enable if target CPU has AVX2:
+
 ```bash
 cmake .. -DFM_TUNER_ENABLE_X86_AVX2=ON
 ```
@@ -49,12 +54,15 @@ cmake .. -DFM_TUNER_ENABLE_X86_AVX2=ON
 ## Running
 
 ### Prerequisites
+
 Start an rtl_tcp server first:
+
 ```bash
 rtl_tcp -p 1234 -f 88600000 -g 20 -s 1020000
 ```
 
 ### Command Line Options
+
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-t, --tcp <host:port>` | rtl_tcp server | localhost:1234 |
@@ -66,6 +74,7 @@ rtl_tcp -p 1234 -f 88600000 -g 20 -s 1020000
 | `-G, --guest` | Guest mode (no auth) | disabled |
 
 ### Examples
+
 ```bash
 # Play audio
 ./fm-tuner-sdr -t localhost:1234 -f 101100 -s
