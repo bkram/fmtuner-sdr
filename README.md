@@ -1,6 +1,8 @@
 # FM Tuner SDR
 
-A cross-platform SDR FM tuner that bridges rtl_tcp hardware to the XDR/FM-DX protocol ecosystem. Connect any RTL-SDR (or other rtl_tcp source) and control it remotely using FM-DX-Webserver, XDR-GTK, or similar clients as if it were a native hardware tuner.
+A cross-platform SDR FM tuner that bridges rtl_tcp hardware to the XDR/FM-DX protocol ecosystem. Control any RTL-SDR (or other rtl_tcp source) remotely using FM-DX-Webserver, XDR-GTK, or similar clients as if it were a native hardware tuner.
+
+> **Note**: While this works great, the quality will not match a hardware tuner like a TEF.
 
 ## Features
 
@@ -8,7 +10,7 @@ A cross-platform SDR FM tuner that bridges rtl_tcp hardware to the XDR/FM-DX pro
 - FM Stereo Demodulation - PLL-based 19kHz pilot detection using SDR++ algorithms
 - RDS Decoding - Decodes RDS groups in a background thread
 - XDR Protocol Server - Compatible with XDR-GTK and FM-DX-Webserver clients on port 7373
-- Audio Output - Audio output via PortAudio or WAV file recording
+- Audio Output - Audio output via ALSA (Linux) or PortAudio (macOS), or WAV file recording
 - SIMD Acceleration - Optimized DSP paths for x86 (SSE/AVX) and ARM (NEON)
 
 ## Requirements
@@ -16,37 +18,30 @@ A cross-platform SDR FM tuner that bridges rtl_tcp hardware to the XDR/FM-DX pro
 - C++17 compiler
 - CMake 3.15+
 - OpenSSL
-- PortAudio
 
-On macOS with Homebrew:
+### macOS
 
 ```bash
 brew install openssl portaudio
 ```
 
-On Windows with vcpkg:
+### Linux (Debian/Ubuntu)
 
 ```bash
-vcpkg install portaudio openssl
+sudo apt install libssl-dev pkg-config libasound2-dev
 ```
 
-On Linux (Debian/Ubuntu):
+### Linux (Fedora)
 
 ```bash
-sudo apt install libssl-dev libssl-dev pkg-config portaudio19-dev
-```
-
-On Linux (Fedora):
-
-```bash
-sudo dnf install openssl-devel portaudio-devel
+sudo dnf install openssl-devel alsa-lib-devel
 ```
 
 ## Building
 
 ### macOS
 
-Apple Silicon (M1/M2/M3):
+Apple Silicon build:
 
 ```bash
 mkdir build && cd build
@@ -54,7 +49,7 @@ cmake .. -DCMAKE_OSX_ARCHITECTURE=arm64
 make
 ```
 
-Intel:
+Intel (x86_64) build:
 
 ```bash
 mkdir build && cd build
@@ -101,17 +96,17 @@ cmake .. -DFM_TUNER_ENABLE_X86_AVX2=ON
 
 Install rtl-sdr (provides rtl_tcp):
 
-| OS | Install |
-|---|---------|
-| macOS | `brew install rtl-sdr` |
-| Linux | `sudo apt install rtl-sdr` or `sudo dnf install rtl-sdr` |
+| OS      | Install Command |
+|---------|----------------|
+| macOS   | `brew install rtl-sdr` |
+| Linux   | `sudo apt install rtl-sdr` or `sudo dnf install rtl-sdr` |
 | Windows | Download [rtl-sdr-blog release](https://github.com/rtlsdrblog/rtl-sdr-blog/releases) (includes rtl_tcp.exe), use [zadig](https://zadig.akeo.ie/) to install USB driver |
 
 ### Quick Start
 
 ```bash
 # Terminal 1: Start rtl_tcp
-rtl_tcp -p 1234 -f 88600000 -g 20 -s 1020000
+rtl_tcp -p 1234 -f 88600000 -g 20 -s 512000
 
 # Terminal 2: Run FM tuner
 ./fm-tuner-sdr -t localhost:1234 -f 88600 -s
@@ -119,16 +114,19 @@ rtl_tcp -p 1234 -f 88600000 -g 20 -s 1020000
 
 ### Command Line Options
 
-| Option | Description | Default |
-|--------|--------------|---------|
-| `-t, --tcp <host:port>` | rtl_tcp server address | localhost:1234 |
-| `-f, --freq <khz>` | Frequency in kHz | 88600 |
-| `-g, --gain <db>` | RTL-SDR gain in dB | auto |
-| `-w, --wav <file>` | Output WAV file | - |
-| `-s, --audio` | Enable audio output | disabled |
-| `-P, --password <pwd>` | XDR server password | - |
-| `-G, --guest` | Enable guest mode (no password) | disabled |
-| `-h, --help` | Show help | - |
+| Option                      | Description                  | Default        |
+|-----------------------------|-------------------------------|---------------|
+| `-t, --tcp <host:port>`    | rtl_tcp server address       | localhost:1234 |
+| `-f, --freq <khz>`         | Frequency in kHz             | 88600         |
+| `-g, --gain <db>`          | RTL-SDR gain in dB           | auto          |
+| `-w, --wav <file>`         | Output WAV file              | -             |
+| `-i, --iq <file>`          | Capture raw IQ bytes to file | -             |
+| `-s, --audio`              | Enable audio output          | disabled      |
+| `-l, --list-audio`        | List available audio devices | -             |
+| `-d, --device <id>`       | Audio output device          | default       |
+| `-P, --password <pwd>`    | XDR server password          | -             |
+| `-G, --guest`             | Enable guest mode            | disabled      |
+| `-h, --help`              | Show help                    | -             |
 
 ### Examples
 
@@ -165,99 +163,84 @@ Key sections:
 - `[tuner]`: Station/audio settings (frequency, deemphasis).
 - `[processing]`: DSP/control behavior.
 
-Important SDR/AGC keys:
+## Gain Strategies
+
+Two gain strategies are supported:
+
+### SDR++ Style (RTL AGC)
 
 ```ini
 [sdr]
-# -1 = auto/AGC profile path, otherwise fixed manual RTL gain in dB
-rtl_gain_db = -1
-# RF level calibration for 0..90 mapping
-signal_floor_dbfs = -55.0
-signal_ceil_dbfs = -19.0
-
-[processing]
-# 0..3 AGC profile used by this app's RTL mapping
-agc_mode = 2
-
-# If false, remote client A/G commands are ignored
-client_gain_allowed = false
-
-[audio]
-# Underflow fade tail in milliseconds (0..50)
-underflow_fade_ms = 8
-# Optional short-impulse click limiter in main path (can color transients)
-click_suppressor = false
-
-[rds]
-# strict|balanced|loose
-aggressiveness = loose
-# AGC smoothing factors (closer to 1.0 = slower changes)
-agc_attack = 0.992
-agc_release = 0.9996
-# Group debounce thresholds for lock state
-lock_acquire_groups = 2
-lock_loss_groups = 14
+gain_strategy = sdrpp
+sdrpp_rtl_agc = true
+sdrpp_rtl_agc_gain_db = 18
 ```
 
-`agc_mode` mapping (used when `rtl_gain_db = -1` and IMS/IF auto bit is not set):
+Uses RTL hardware AGC with fixed IF gain (0-28 dB). Run with `-g -1` to enable.
 
-- `A0` -> ~44 dB
-- `A1` -> ~36 dB
-- `A2` -> ~30 dB
-- `A3` -> ~24 dB
+### TEF Style (Manual IF Gain)
 
-Notes:
+```ini
+[sdr]
+gain_strategy = tef
+```
 
-- If `rtl_gain_db >= 0`, fixed manual gain is used and AGC profile selection is bypassed.
-- CLI `-g` also forces manual gain and overrides INI gain behavior.
+Uses manual IF gain with TEF-like A profiles:
+
+| A-Mode | Gain (dB) |
+|--------|------------|
+| A0     | 44         |
+| A1     | 36         |
+| A2     | 30 (default) |
+| A3     | 24         |
+
+Run with `-g -1` for auto (A2=30dB), or `-g 36` for specific gain.
 
 ## Audio Loopback
 
-To pipe audio to other applications (like FM-DX-Webserver), use a virtual audio cable:
+An audio loopback (virtual audio cable) creates a virtual audio device that
+captures output from one application and makes it available as input to
+another. This lets you pipe FM-Tuner-SDR audio to other apps like
+FM-DX-Webserver.
 
-| OS | Tool |
-|---|------|
-| Linux | PulseAudio, ALSA loopback, JACK |
-| macOS | BlackHole, Soundflower, Loopback (commercial) |
-| Windows | VB-Audio Virtual Cable, Voicemeeter |
+| OS      | Tool                        |
+|---------|-----------------------------|
+| Linux   | ALSA loopback kernel module |
+| macOS   | BlackHole                  |
+| Windows | VB-Audio Virtual Cable     |
 
-On macOS with Homebrew:
+To use: install the virtual audio device for your OS (Linux: `sudo modprobe snd-aloop`,
+macOS: `brew install blackhole-2ch`, Windows: VB-Audio Virtual Cable), then set the
+audio device in your config file:
 
-```bash
-brew install blackhole-2ch
+```ini
+[audio]
+device = your_loopback_device
 ```
 
-Then select the loopback device as your audio output in system settings or the target application.
+Finally, configure your target application to use the loopback device as input.
 
 ## Architecture
 
+```text
+rtl_tcp Server ----> RTL-TCP Client ----> FM Demod ----> Stereo Decoder
+                              |                    |
+                              |                    v
+                              |               RDS Decoder
+                              |                    |
+                              v                    v
+                        XDR Server <---- AF Post Processor ----> Audio Output
 ```
-+------------------+     +-------------------+     +--------------+
-| XDR Client      |---->| FM Tuner SDR     |<----| rtl_tcp     |
-| (port 7373)     |     | (this app)       |     | Server      |
-+------------------+     +-------------------+     +--------------+
-                                 |
-         +-----------------------+-----------------------+
-         |                       |                       |
-         v                       v                       v
-   +----------+            +-----------+           +---------+
-   | FM Demod |<-----------| RTL-TCP   |           | XDR     |
-   | (Phase)  |           | Client    |           | Server  |
-   +----------+           +-----------+           +---------+
-         |                                               |
-         v                                               v
-   +----------+            +-----------+           +---------+
-   | Stereo   |            | RDS       |           | Audio   |
-   | Decoder  |---------->| Decoder   |           | Output  |
-   | (PLL)    |           | (Thread)  |           | (WAV/   |
-   +----------+            +-----------+           | Speaker)|
-         |                                       +---------+
-         v
-   +----------+
-   | AF Post  |
-   | Processor|
-   +----------+
-```
+
+Components:
+
+- **RTL-TCP Client**: Connects to rtl_tcp server, receives IQ samples
+- **FM Demod**: Quadrature demodulation (atan2 phase detector)
+- **Stereo Decoder**: PLL-based 19kHz pilot detection, stereo/mono blend
+- **RDS Decoder**: Background thread decoding RDS groups
+- **AF Post Processor**: Deemphasis, resampling, volume
+- **Audio Output**: ALSA/PortAudio speaker or WAV file recording
+- **XDR Server**: Handles remote client connections on port 7373
 
 ## Testing
 
@@ -266,65 +249,17 @@ pip install pytest numpy
 pytest tests/
 ```
 
-## IQ Analysis Tool
-
-Capture IQ while running:
-
-```bash
-./fm-tuner-sdr -c fm-tuner-sdr.ini -s -i /tmp/capture.iq
-```
-
-Analyze capture:
-
-```bash
-python3 tools/analyze_iq.py /tmp/capture.iq --sample-rate 256000
-```
-
-## Gain Calibration Tool
-
-Calibrate a stable `rtl_gain_db` across multiple FM frequencies:
-
-```bash
-python3 tools/calibrate_gain.py \
-  --freqs 88600,96800,105900,107200 \
-  --gains 0,7,14,20,28,35,42,49 \
-  --seconds 8
-```
-
-Outputs:
-
-- JSON report with all tested points and scores.
-- `recommended_sdr.ini` snippet with recommended `rtl_gain_db` for normal runs.
-
-Full FM-band reference file (87.5-108.0 MHz, 100 kHz steps):
-
-```bash
-python3 tools/calibrate_gain.py \
-  --full-band \
-  --freq-start-khz 87500 \
-  --freq-end-khz 108000 \
-  --freq-step-khz 100 \
-  --gains 0,7,14,20,28,35,42,49 \
-  --seconds 6
-```
-
-Additional external reference outputs:
-
-- `gain_reference.csv` (`freq_khz,gain_db,source`)
-- `gain_reference.ini` (`[gain_reference]` mapping)
-- `gain_reference.json` (machine-readable mapping with source)
-
 ## Credits
 
 This project is based on or modeled after the following open source projects:
 
-| Project | Description | Link |
-|---------|-------------|------|
-| SDRPlusPlus | FM demodulation (quadrature), stereo decoder (PLL-based pilot detection), RDS decoding | <https://github.com/AlexandreRouma/SDRPlusPlus> |
-| XDR-GTK | XDR protocol client implementation, RDS parser | <https://github.com/kkonradpl/xdr-gtk> |
-| librdsparser | RDS parsing library (submodule of XDR-GTK) | <https://github.com/kkonradpl/librdsparser> |
-| FM-DX-Tuner | TEF tuner firmware, FM-DX protocol reference | <https://github.com/kkonradpl/FM-DX-Tuner> |
-| xdrd | Original XDR daemon protocol implementation | <https://github.com/kkonradpl/xdrd> |
+| Project      | Description                                                                              | Link                                           |
+|--------------|------------------------------------------------------------------------------------------|------------------------------------------------|
+| SDRPlusPlus  | FM demodulation (quadrature), stereo decoder (PLL-based pilot detection), RDS decoding   | https://github.com/AlexandreRouma/SDRPlusPlus |
+| XDR-GTK      | XDR protocol client implementation, RDS parser                                         | https://github.com/kkonradpl/xdr-gtk          |
+| librdsparser | RDS parsing library (submodule of XDR-GTK)                                              | https://github.com/kkonradpl/librdsparser      |
+| FM-DX-Tuner  | TEF tuner firmware, FM-DX protocol reference                                              | https://github.com/kkonradpl/FM-DX-Tuner       |
+| xdrd         | Original XDR daemon protocol implementation                                             | https://github.com/kkonradpl/xdrd             |
 
 ## License
 
@@ -334,13 +269,13 @@ GNU General Public License v3.0 - see [LICENSE](LICENSE) file
 
 This software includes the following third-party components:
 
-| Component | License | Notes |
-|-----------|---------|-------|
-| OpenSSL | Apache 2.0 / SSLeay | See [LICENSE](LICENSE) and [OpenSSL license](https://www.openssl.org/source/license.html) |
-| PortAudio | MIT | |
-| SDRPlusPlus | GPLv3 | |
-| XDR-GTK | GPLv3 | |
-| FM-DX-Tuner | GPLv3 | |
-| xdrd | GPLv2 | |
+| Component    | License          | Notes                                                                                     |
+|--------------|------------------|-------------------------------------------------------------------------------------------|
+| OpenSSL      | Apache 2.0 / SSLeay | See [LICENSE](LICENSE) and [OpenSSL license](https://www.openssl.org/source/license.html) |
+| PortAudio    | MIT              |                                                                                           |
+| SDRPlusPlus  | GPLv3            |                                                                                           |
+| XDR-GTK      | GPLv3            |                                                                                           |
+| FM-DX-Tuner  | GPLv3            |                                                                                           |
+| xdrd         | GPLv2            |                                                                                           |
 
 For binary distributions, include the LICENSE file and this attribution notice.

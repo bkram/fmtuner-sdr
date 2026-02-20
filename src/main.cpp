@@ -224,15 +224,10 @@ int main(int argc, char* argv[]) {
                   << OUTPUT_RATE << "/" << AudioOutput::FRAMES_PER_BUFFER
                   << " in current SDR architecture; INI values are ignored\n";
     }
-    if (config.sdr.gain_strategy == "sdrpp" && config.sdr.overload_auto_gain) {
-        std::cerr << "Warning: sdr.overload_auto_gain is ignored when sdr.gain_strategy=sdrpp\n";
-    }
-
     std::string tcpHost = config.rtl_tcp.host;
     uint16_t tcpPort = config.rtl_tcp.port;
     uint32_t freqKHz = config.tuner.default_freq;
     int gain = config.sdr.rtl_gain_db;
-    const int overloadAutoGainMaxDb = std::clamp(config.sdr.overload_auto_gain_max_db, 0, 49);
     const bool useSdrppGainStrategy = (config.sdr.gain_strategy == "sdrpp");
     const int defaultCustomGainFlags = config.sdr.default_custom_gain_flags;
     bool allowClientGainOverride = config.processing.client_gain_allowed;
@@ -384,10 +379,6 @@ int main(int argc, char* argv[]) {
         return ims;
     };
 
-    auto useOverloadAutoGain = [&]() -> bool {
-        return config.sdr.overload_auto_gain && !useSdrppGainStrategy && gain < 0 && !isImsAgcEnabled();
-    };
-
     auto calculateAppliedGainDb = [&]() -> int {
         // TEF-like AGC threshold profile approximation on RTL-SDR.
         static constexpr int kAgcToGainDb[4] = {44, 36, 30, 24}; // highest..low
@@ -403,16 +394,11 @@ int main(int argc, char* argv[]) {
         return std::clamp(gainDb, 0, 49);
     };
 
-    int dynamicGainDb = std::clamp(calculateAppliedGainDb(), 0, overloadAutoGainMaxDb);
-    int currentManualGainDb = dynamicGainDb;
     auto effectiveAppliedGainDb = [&]() -> int {
         if (isImsAgcEnabled()) {
             return calculateAppliedGainDb();
         }
-        if (useOverloadAutoGain()) {
-            return dynamicGainDb;
-        }
-        return currentManualGainDb;
+        return calculateAppliedGainDb();
     };
 
     auto applyRtlGainAndAgc = [&](const char* reason) {
@@ -427,7 +413,8 @@ int main(int argc, char* argv[]) {
                 okGainMode = rtlClient.setGainMode(true);
                 okGain = rtlClient.setGain(static_cast<uint32_t>(std::clamp(gain, 0, 49) * 10));
             } else {
-                okGainMode = rtlClient.setGainMode(false);
+                okGainMode = rtlClient.setGainMode(true);
+                okGain = rtlClient.setGain(static_cast<uint32_t>(config.sdr.sdrpp_rtl_agc_gain_db * 10));
             }
             okAgc = rtlClient.setAGC(config.sdr.sdrpp_rtl_agc);
             if (verboseLogging) {
@@ -435,7 +422,7 @@ int main(int argc, char* argv[]) {
                           << " strategy=sdrpp"
                           << " tuner_agc=" << ((gain < 0) ? 1 : 0)
                           << " rtl_agc=" << (config.sdr.sdrpp_rtl_agc ? 1 : 0)
-                          << " manual_gain=" << ((gain >= 0) ? std::clamp(gain, 0, 49) : -1)
+                          << " if_gain=" << ((gain >= 0) ? std::clamp(gain, 0, 49) : config.sdr.sdrpp_rtl_agc_gain_db)
                           << " dB\n";
             }
             if (!okGainMode || !okAgc || !okGain) {
@@ -451,24 +438,19 @@ int main(int argc, char* argv[]) {
         const int rf = ((custom / 10) % 10) ? 1 : 0;
         const int ifv = (custom % 10) ? 1 : 0;
         const bool imsAgc = isImsAgcEnabled();
-        int gainDb = calculateAppliedGainDb();
-        if (useOverloadAutoGain()) {
-            gainDb = dynamicGainDb;
-        }
+        const int gainDb = calculateAppliedGainDb();
 
         bool okGainMode = false;
         bool okAgc = false;
         bool okGain = true;
 
         if (imsAgc) {
-            // IMS bit maps to RTL automatic gain behavior.
             okGainMode = rtlClient.setGainMode(false);
             okAgc = rtlClient.setAGC(true);
         } else {
             okGainMode = rtlClient.setGainMode(true);
             okAgc = rtlClient.setAGC(false);
             okGain = rtlClient.setGain(static_cast<uint32_t>(gainDb * 10));
-            currentManualGainDb = gainDb;
         }
 
         if (verboseLogging) {
@@ -898,10 +880,6 @@ int main(int argc, char* argv[]) {
         const bool agcChanged = pendingAGC.exchange(false);
         const bool bandwidthChanged = pendingBandwidth.exchange(false);
         if (rtlConnected && (gainChanged || agcChanged)) {
-            if (useOverloadAutoGain()) {
-                dynamicGainDb = std::clamp(calculateAppliedGainDb(), 0, overloadAutoGainMaxDb);
-                currentManualGainDb = dynamicGainDb;
-            }
             applyRtlGainAndAgc((gainChanged && agcChanged) ? "runtime/update(A+G)"
                                                            : (agcChanged ? "runtime/update(A)"
                                                                          : "runtime/update(G)"));
@@ -1055,68 +1033,6 @@ int main(int argc, char* argv[]) {
             rfLevelInitialized = true;
         } else {
             rfLevelFiltered = rfLevelFiltered * 0.70f + rfLevel * 0.30f;
-        }
-        if (rtlConnected && useOverloadAutoGain()) {
-            const auto now = std::chrono::steady_clock::now();
-            bool gainAdjusted = false;
-            int downStep = 0;
-            int downIntervalMs = 0;
-            if (clipRatio > 0.040 || dbfs > -3.0) {
-                downStep = 6;
-                downIntervalMs = 4;
-            } else if (clipRatio > 0.020 || dbfs > -6.0) {
-                downStep = 4;
-                downIntervalMs = 6;
-            } else if (clipRatio > 0.008 || dbfs > -10.0) {
-                downStep = 2;
-                downIntervalMs = 9;
-            } else if (clipRatio > 0.003 || dbfs > -13.0) {
-                downStep = 1;
-                downIntervalMs = 12;
-            }
-
-            if (downStep > 0 &&
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastGainDown).count() >= downIntervalMs) {
-                const int nextGain = std::max(0, dynamicGainDb - downStep);
-                if (nextGain != dynamicGainDb) {
-                    dynamicGainDb = nextGain;
-                    gainAdjusted = true;
-                    lastGainDown = now;
-                    lastGainUp = now;
-                    if (verboseLogging) {
-                        std::ostringstream hard;
-                        hard << std::fixed << std::setprecision(4) << hardClipRatio;
-                        std::ostringstream near;
-                        near << std::fixed << std::setprecision(4) << nearClipRatio;
-                        std::ostringstream db;
-                        db << std::fixed << std::setprecision(1) << dbfs;
-                        std::cout << "[RTL] overload guard: clip=" << hard.str()
-                                  << " near=" << near.str()
-                                  << " dbfs=" << db.str()
-                                  << " step=-" << downStep
-                                  << " -> tuner_gain=" << dynamicGainDb << " dB\n";
-                    }
-                }
-            } else if (nearClipRatio < 0.0010 && dbfs < -24.0 &&
-                       std::chrono::duration_cast<std::chrono::milliseconds>(now - lastGainUp).count() >= 180) {
-                const int nextGain = std::min(overloadAutoGainMaxDb, dynamicGainDb + 1);
-                if (nextGain != dynamicGainDb) {
-                    dynamicGainDb = nextGain;
-                    gainAdjusted = true;
-                    lastGainUp = now;
-                    if (verboseLogging) {
-                        std::cout << "[RTL] overload guard recover -> tuner_gain=" << dynamicGainDb << " dB\n";
-                    }
-                }
-            }
-
-            if (gainAdjusted && dynamicGainDb != currentManualGainDb) {
-                if (!rtlClient.setGain(static_cast<uint32_t>(dynamicGainDb * 10)) && verboseLogging) {
-                    std::cerr << "[RTL] overload guard: setGain failed\n";
-                } else {
-                    currentManualGainDb = dynamicGainDb;
-                }
-            }
         }
         const bool effectiveForceMono = targetForceMono;
         if (effectiveForceMono != appliedEffectiveForceMono) {

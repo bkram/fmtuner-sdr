@@ -19,10 +19,9 @@ struct Config {
     struct SDRSection {
         int rtl_gain_db = -1;
         int default_custom_gain_flags = 0;
-        bool overload_auto_gain = true;
-        int overload_auto_gain_max_db = 49;
         std::string gain_strategy = "tef"; // tef|sdrpp
         bool sdrpp_rtl_agc = false;
+        int sdrpp_rtl_agc_gain_db = 18;
         double signal_floor_dbfs = -55.0;
         double signal_ceil_dbfs = -19.0;
     } sdr;

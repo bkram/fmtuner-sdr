@@ -58,7 +58,7 @@ cmake .. -DFM_TUNER_ENABLE_X86_AVX2=ON
 Start an rtl_tcp server first:
 
 ```bash
-rtl_tcp -p 1234 -f 88600000 -g 20 -s 1020000
+rtl_tcp -p 1234 -f 88600000 -g 20 -s 512000
 ```
 
 ### Command Line Options
@@ -83,13 +83,6 @@ rtl_tcp -p 1234 -f 88600000 -g 20 -s 1020000
 ./fm-tuner-sdr -t localhost:1234 -f 101100 -w output.wav
 ```
 
-## Testing
-
-```bash
-pip install pytest numpy
-pytest tests/
-```
-
 ## Project Structure
 
 ```
@@ -106,6 +99,7 @@ src/
 
 include/               - Header files
 
+Not commited in this repository
 research/              - Reference implementations
   SDRPlusPlus/         - FM demod, stereo, RDS algorithms
   xdr-gtk/             - XDR protocol client

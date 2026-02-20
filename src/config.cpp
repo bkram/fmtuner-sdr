@@ -173,16 +173,6 @@ bool Config::loadFromFile(const std::string& filename) {
                     const int ifv = (parsed % 10) ? 1 : 0;
                     sdr.default_custom_gain_flags = rf * 10 + ifv;
                 }
-            } else if (key == "overload_auto_gain") {
-                bool parsed = false;
-                if (parseBool(value, parsed)) {
-                    sdr.overload_auto_gain = parsed;
-                }
-            } else if (key == "overload_auto_gain_max_db") {
-                int parsed = 0;
-                if (parseInt(value, parsed)) {
-                    sdr.overload_auto_gain_max_db = std::clamp(parsed, 0, 49);
-                }
             } else if (key == "gain_strategy") {
                 const std::string parsed = toLower(trim(value));
                 if (parsed == "tef" || parsed == "sdrpp") {
@@ -192,6 +182,11 @@ bool Config::loadFromFile(const std::string& filename) {
                 bool parsed = false;
                 if (parseBool(value, parsed)) {
                     sdr.sdrpp_rtl_agc = parsed;
+                }
+            } else if (key == "sdrpp_rtl_agc_gain_db") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    sdr.sdrpp_rtl_agc_gain_db = std::clamp(parsed, 0, 28);
                 }
             } else if (key == "signal_floor_dbfs") {
                 double parsed = 0.0;
@@ -260,33 +255,6 @@ bool Config::loadFromFile(const std::string& filename) {
                 bool parsed = false;
                 if (parseBool(value, parsed)) {
                     processing.rds = parsed;
-                }
-            }
-        } else if (section == "rds") {
-            if (key == "aggressiveness") {
-                const std::string parsed = toLower(trim(value));
-                if (parsed == "strict" || parsed == "balanced" || parsed == "loose") {
-                    rds.aggressiveness = parsed;
-                }
-            } else if (key == "agc_attack") {
-                float parsed = 0.0f;
-                if (parseFloat(value, parsed)) {
-                    rds.agc_attack = std::clamp(parsed, 0.90f, 0.99995f);
-                }
-            } else if (key == "agc_release") {
-                float parsed = 0.0f;
-                if (parseFloat(value, parsed)) {
-                    rds.agc_release = std::clamp(parsed, 0.90f, 0.99999f);
-                }
-            } else if (key == "lock_acquire_groups") {
-                int parsed = 0;
-                if (parseInt(value, parsed)) {
-                    rds.lock_acquire_groups = std::clamp(parsed, 1, 16);
-                }
-            } else if (key == "lock_loss_groups") {
-                int parsed = 0;
-                if (parseInt(value, parsed)) {
-                    rds.lock_loss_groups = std::clamp(parsed, 1, 64);
                 }
             }
         } else if (section == "debug") {
