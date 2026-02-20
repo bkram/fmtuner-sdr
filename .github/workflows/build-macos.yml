@@ -15,15 +15,17 @@ jobs:
 
     - name: Install dependencies
       run: |
-        brew install cmake pkg-config libtool
-        brew install librtlsdr
-        brew install libusb
-        brew install portaudio
-        brew install openssl
+        for pkg in cmake pkgconf libtool librtlsdr libusb portaudio openssl@3; do
+          if brew list --versions "$pkg" >/dev/null; then
+            echo "$pkg already installed"
+          else
+            brew install "$pkg"
+          fi
+        done
 
     - name: Build
       run: |
-        export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+        export OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
         cmake -S . -B build -DFM_TUNER_ENABLE_PORTAUDIO=ON
         cmake --build build -j$(sysctl -n hw.ncpu)
 
