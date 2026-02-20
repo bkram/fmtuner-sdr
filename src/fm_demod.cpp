@@ -568,7 +568,7 @@ void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
             q_val = firLinearScalar(m_iqTapsRev.data(), qWindow, iqTapCount);
         }
 
-        const float phase = std::atan2f(q_val, i_val);
+        const float phase = atan2f(q_val, i_val);
         if (!havePhase) {
             audio[i] = 0.0f;
             lastPhase = phase;
