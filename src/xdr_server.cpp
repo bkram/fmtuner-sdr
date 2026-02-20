@@ -1,9 +1,15 @@
 #include "xdr_server.h"
+#if defined(_WIN32)
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#endif
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -18,6 +24,12 @@
 #include <random>
 
 namespace {
+#if defined(_WIN32)
+using SocketLen = int;
+#else
+using SocketLen = socklen_t;
+#endif
+
 uint64_t steadyNowMs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch())
@@ -25,10 +37,64 @@ uint64_t steadyNowMs() {
 }
 
 void setRecvTimeoutMs(int clientSocket, int timeoutMs) {
+#if defined(_WIN32)
+    const DWORD timeout = timeoutMs > 0 ? static_cast<DWORD>(timeoutMs) : 0;
+    setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
     struct timeval tv;
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
     setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+void closeSocket(int sock) {
+#if defined(_WIN32)
+    closesocket(static_cast<SOCKET>(sock));
+#else
+    close(sock);
+#endif
+}
+
+void shutdownSocket(int sock) {
+#if defined(_WIN32)
+    shutdown(static_cast<SOCKET>(sock), SD_BOTH);
+#else
+    shutdown(sock, SHUT_RDWR);
+#endif
+}
+
+int lastSocketError() {
+#if defined(_WIN32)
+    return WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
+bool socketInterrupted(int err) {
+#if defined(_WIN32)
+    return err == WSAEINTR;
+#else
+    return err == EINTR;
+#endif
+}
+
+bool socketWouldBlock(int err) {
+#if defined(_WIN32)
+    return err == WSAEWOULDBLOCK || err == WSAETIMEDOUT;
+#else
+    return err == EAGAIN || err == EWOULDBLOCK;
+#endif
+}
+
+bool equalsIgnoreCase(const std::string& a, const std::string& b) {
+#if defined(_WIN32)
+    return _stricmp(a.c_str(), b.c_str()) == 0;
+#else
+    return strcasecmp(a.c_str(), b.c_str()) == 0;
+#endif
 }
 
 bool recvLine(int clientSocket, std::string& line, size_t maxLen) {
@@ -36,7 +102,7 @@ bool recvLine(int clientSocket, std::string& line, size_t maxLen) {
 
     while (line.length() < maxLen) {
         char ch = '\0';
-        ssize_t n = recv(clientSocket, &ch, 1, 0);
+        const auto n = recv(clientSocket, &ch, 1, 0);
         if (n <= 0) {
             return !line.empty();
         }
@@ -139,6 +205,21 @@ uint8_t evaluatePiState(const std::array<uint16_t, 64>& piBuffer,
     if (count >= 3) return 2;              // STATE_LIKELY
     if (count == 2 || correctCount) return 3;  // STATE_UNLIKELY
     return 4;                              // STATE_INVALID
+}
+
+bool ensureSocketSubsystem() {
+#if defined(_WIN32)
+    static bool initialized = false;
+    static bool success = false;
+    if (!initialized) {
+        WSADATA wsaData;
+        success = (WSAStartup(MAKEWORD(2, 2), &wsaData) == 0);
+        initialized = true;
+    }
+    return success;
+#else
+    return true;
+#endif
 }
 }  // namespace
 
@@ -258,8 +339,8 @@ std::string XDRServer::computeSHA1(const std::string& salt, const std::string& p
 
 bool XDRServer::authenticate(const std::string& salt, const std::string& passwordHash) {
     std::string expected = computeSHA1(salt, m_password);
-    return (expected.length() == passwordHash.length() && 
-            strcasecmp(expected.c_str(), passwordHash.c_str()) == 0);
+    return (expected.length() == passwordHash.length() &&
+            equalsIgnoreCase(expected, passwordHash));
 }
 
 std::string XDRServer::buildXdrStateSnapshot() const {
@@ -412,6 +493,11 @@ bool XDRServer::start() {
         return false;
     }
 
+    if (!ensureSocketSubsystem()) {
+        std::cerr << "Failed to initialize socket subsystem" << std::endl;
+        return false;
+    }
+
     m_serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (m_serverSocket < 0) {
         std::cerr << "Failed to create server socket" << std::endl;
@@ -429,14 +515,14 @@ bool XDRServer::start() {
 
     if (bind(m_serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
         std::cerr << "Failed to bind to port " << m_port << std::endl;
-        close(m_serverSocket);
+        closeSocket(m_serverSocket);
         m_serverSocket = -1;
         return false;
     }
 
     if (listen(m_serverSocket, 5) < 0) {
         std::cerr << "Failed to listen on port " << m_port << std::endl;
-        close(m_serverSocket);
+        closeSocket(m_serverSocket);
         m_serverSocket = -1;
         return false;
     }
@@ -445,7 +531,7 @@ bool XDRServer::start() {
     m_acceptThread = std::thread([this]() {
         while (m_running) {
             struct sockaddr_in clientAddr;
-            socklen_t clientLen = sizeof(clientAddr);
+            SocketLen clientLen = sizeof(clientAddr);
             int clientSocket = accept(m_serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
 
             if (clientSocket >= 0) {
@@ -454,11 +540,11 @@ bool XDRServer::start() {
                 std::thread([this, clientSocket]() {
                     handleClient(clientSocket);
                     removeClientSocket(clientSocket);
-                    close(clientSocket);
+                    closeSocket(clientSocket);
                     m_activeClientThreads.fetch_sub(1, std::memory_order_relaxed);
                     m_clientThreadWaitCv.notify_all();
                 }).detach();
-            } else if (m_running && (errno == EINTR)) {
+            } else if (m_running && socketInterrupted(lastSocketError())) {
                 continue;
             }
         }
@@ -478,8 +564,8 @@ void XDRServer::stop() {
     m_running = false;
 
     if (m_serverSocket >= 0) {
-        shutdown(m_serverSocket, SHUT_RDWR);
-        close(m_serverSocket);
+        shutdownSocket(m_serverSocket);
+        closeSocket(m_serverSocket);
         m_serverSocket = -1;
     }
 
@@ -489,7 +575,7 @@ void XDRServer::stop() {
         clients = m_clientSockets;
     }
     for (int sock : clients) {
-        shutdown(sock, SHUT_RDWR);
+        shutdownSocket(sock);
     }
 
     if (m_acceptThread.joinable()) {
@@ -505,7 +591,7 @@ void XDRServer::stop() {
 void XDRServer::handleClient(int clientSocket) {
     char clientIP[INET_ADDRSTRLEN];
     struct sockaddr_in clientAddr;
-    socklen_t clientLen = sizeof(clientAddr);
+    SocketLen clientLen = sizeof(clientAddr);
     getpeername(clientSocket, (struct sockaddr*)&clientAddr, &clientLen);
     inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, INET_ADDRSTRLEN);
     
@@ -513,7 +599,7 @@ void XDRServer::handleClient(int clientSocket) {
     
     setRecvTimeoutMs(clientSocket, 200);
     char firstByte = '\0';
-    ssize_t n = recv(clientSocket, &firstByte, 1, MSG_PEEK);
+    const auto n = recv(clientSocket, &firstByte, 1, MSG_PEEK);
     setRecvTimeoutMs(clientSocket, 0);
 
     bool isFmdxProtocol = (n > 0 && firstByte == 'x');
@@ -551,9 +637,9 @@ void XDRServer::handleFmdxClient(int clientSocket) {
     setRecvTimeoutMs(clientSocket, 200);
 
     while (m_running && !disconnectRequested) {
-        ssize_t n = recv(clientSocket, cmdBuffer, sizeof(cmdBuffer) - 1, 0);
+        const auto n = recv(clientSocket, cmdBuffer, sizeof(cmdBuffer) - 1, 0);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (socketWouldBlock(lastSocketError())) {
                 continue;
             }
             break;
@@ -691,9 +777,9 @@ void XDRServer::handleXdrClient(int clientSocket, const char* clientIP) {
     auto lastSignal = std::chrono::steady_clock::now();
 
     while (m_running) {
-        ssize_t n = recv(clientSocket, cmdBuffer, sizeof(cmdBuffer) - 1, 0);
+        const auto n = recv(clientSocket, cmdBuffer, sizeof(cmdBuffer) - 1, 0);
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (socketWouldBlock(lastSocketError())) {
                 bool sendFailed = false;
                 std::vector<std::string> rdsLines;
                 {

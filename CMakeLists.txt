@@ -159,5 +159,8 @@ if(FM_TUNER_ENABLE_ALSA)
         target_link_libraries(fm-tuner-sdr PRIVATE ${ALSA_LIBRARIES})
     endif()
 endif()
+if(WIN32)
+    target_link_libraries(fm-tuner-sdr PRIVATE ws2_32)
+endif()
 
 install(TARGETS fm-tuner-sdr DESTINATION bin)

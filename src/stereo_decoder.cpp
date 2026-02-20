@@ -8,6 +8,10 @@
 #include <arm_neon.h>
 #endif
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr int kPilotAcquireBlocks = 10;

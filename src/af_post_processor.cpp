@@ -12,6 +12,10 @@
 #include <arm_neon.h>
 #endif
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 namespace {
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #if defined(__has_attribute)

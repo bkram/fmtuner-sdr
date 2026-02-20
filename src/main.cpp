@@ -3,7 +3,6 @@
 #include <atomic>
 #include <cctype>
 #include <cstring>
-#include <getopt.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -240,102 +239,155 @@ int main(int argc, char* argv[]) {
     uint16_t xdrPort = config.xdr.port;
     bool autoReconnect = config.reconnection.auto_reconnect;
 
-    static struct option longOptions[] = {
-        {"config", required_argument, 0, 'c'},
-        {"tcp", required_argument, 0, 't'},
-        {"freq", required_argument, 0, 'f'},
-        {"gain", required_argument, 0, 'g'},
-        {"wav", required_argument, 0, 'w'},
-        {"iq", required_argument, 0, 'i'},
-        {"audio", no_argument, 0, 's'},
-        {"list-audio", no_argument, 0, 'l'},
-        {"device", required_argument, 0, 'd'},
-        {"password", required_argument, 0, 'P'},
-        {"guest", no_argument, 0, 'G'},
-        {"help", no_argument, 0, 'h'},
-        {0, 0, 0, 0}
+    auto parseTcpOption = [&](const std::string& value) -> bool {
+        size_t colon = value.find(':');
+        if (colon != std::string::npos) {
+            tcpHost = value.substr(0, colon);
+            try {
+                const int parsedPort = std::stoi(value.substr(colon + 1));
+                if (parsedPort < 1 || parsedPort > 65535) {
+                    std::cerr << "Invalid tcp port: " << parsedPort << "\n";
+                    return false;
+                }
+                tcpPort = static_cast<uint16_t>(parsedPort);
+            } catch (...) {
+                std::cerr << "Invalid --tcp value: " << value << "\n";
+                return false;
+            }
+        } else {
+            tcpHost = value;
+        }
+        return true;
     };
 
-    int opt;
-    while ((opt = getopt_long(argc, argv, "c:t:f:g:w:i:sld:P:Gh", longOptions, nullptr)) != -1) {
-        switch (opt) {
-            case 'c':
-                configPath = optarg;
-                break;
-            case 't': {
-                std::string arg = optarg;
-                size_t colon = arg.find(':');
-                if (colon != std::string::npos) {
-                    tcpHost = arg.substr(0, colon);
-                    try {
-                        const int parsedPort = std::stoi(arg.substr(colon + 1));
-                        if (parsedPort < 1 || parsedPort > 65535) {
-                            std::cerr << "Invalid tcp port: " << parsedPort << "\n";
-                            return 1;
-                        }
-                        tcpPort = static_cast<uint16_t>(parsedPort);
-                    } catch (...) {
-                        std::cerr << "Invalid --tcp value: " << arg << "\n";
-                        return 1;
-                    }
-                } else {
-                    tcpHost = arg;
-                }
-                break;
-            }
-            case 'f': {
-                try {
-                    const int parsedFreq = std::stoi(optarg);
-                    if (parsedFreq <= 0) {
-                        std::cerr << "Invalid frequency kHz: " << parsedFreq << "\n";
-                        return 1;
-                    }
-                    freqKHz = static_cast<uint32_t>(parsedFreq);
-                } catch (...) {
-                    std::cerr << "Invalid --freq value: " << optarg << "\n";
-                    return 1;
-                }
-                break;
-            }
-            case 'g': {
-                try {
-                    gain = std::stoi(optarg);
-                } catch (...) {
-                    std::cerr << "Invalid --gain value: " << optarg << "\n";
-                    return 1;
-                }
-                break;
-            }
-            case 'w':
-                wavFile = optarg;
-                break;
-            case 'i':
-                iqFile = optarg;
-                break;
-            case 's':
-                enableSpeaker = true;
-                break;
-            case 'l':
-                if (!AudioOutput::listDevices()) {
-                    return 1;
-                }
-                return 0;
-            case 'd':
-                audioDevice = optarg;
-                break;
-            case 'P':
-                xdrPassword = optarg;
-                break;
-            case 'G':
-                xdrGuestMode = true;
-                break;
-            case 'h':
-                printUsage(argv[0]);
-                return 0;
-            default:
-                printUsage(argv[0]);
-                return 1;
+    auto parseIntOption = [&](const std::string& name, const std::string& value, int& out) -> bool {
+        try {
+            out = std::stoi(value);
+            return true;
+        } catch (...) {
+            std::cerr << "Invalid --" << name << " value: " << value << "\n";
+            return false;
         }
+    };
+
+    auto parseUIntFreqKHz = [&](const std::string& value) -> bool {
+        try {
+            const int parsedFreq = std::stoi(value);
+            if (parsedFreq <= 0) {
+                std::cerr << "Invalid frequency kHz: " << parsedFreq << "\n";
+                return false;
+            }
+            freqKHz = static_cast<uint32_t>(parsedFreq);
+            return true;
+        } catch (...) {
+            std::cerr << "Invalid --freq value: " << value << "\n";
+            return false;
+        }
+    };
+
+    auto readValue = [&](int& index, const std::string& current, const std::string& longName) -> std::string {
+        const std::string prefix = "--" + longName + "=";
+        if (current.rfind(prefix, 0) == 0) {
+            return current.substr(prefix.length());
+        }
+        if (index + 1 < argc) {
+            index++;
+            return argv[index];
+        }
+        return std::string();
+    };
+
+    for (int i = 1; i < argc; i++) {
+        const std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            printUsage(argv[0]);
+            return 0;
+        }
+        if (arg == "-s" || arg == "--audio") {
+            enableSpeaker = true;
+            continue;
+        }
+        if (arg == "-G" || arg == "--guest") {
+            xdrGuestMode = true;
+            continue;
+        }
+        if (arg == "-l" || arg == "--list-audio") {
+            if (!AudioOutput::listDevices()) {
+                return 1;
+            }
+            return 0;
+        }
+
+        if (arg == "-c" || arg == "--config" || arg.rfind("--config=", 0) == 0) {
+            const std::string value = readValue(i, arg, "config");
+            if (value.empty()) {
+                std::cerr << "Missing value for --config\n";
+                return 1;
+            }
+            configPath = value;
+            continue;
+        }
+        if (arg == "-t" || arg == "--tcp" || arg.rfind("--tcp=", 0) == 0) {
+            const std::string value = readValue(i, arg, "tcp");
+            if (value.empty() || !parseTcpOption(value)) {
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "-f" || arg == "--freq" || arg.rfind("--freq=", 0) == 0) {
+            const std::string value = readValue(i, arg, "freq");
+            if (value.empty() || !parseUIntFreqKHz(value)) {
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "-g" || arg == "--gain" || arg.rfind("--gain=", 0) == 0) {
+            const std::string value = readValue(i, arg, "gain");
+            if (value.empty() || !parseIntOption("gain", value, gain)) {
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "-w" || arg == "--wav" || arg.rfind("--wav=", 0) == 0) {
+            const std::string value = readValue(i, arg, "wav");
+            if (value.empty()) {
+                std::cerr << "Missing value for --wav\n";
+                return 1;
+            }
+            wavFile = value;
+            continue;
+        }
+        if (arg == "-i" || arg == "--iq" || arg.rfind("--iq=", 0) == 0) {
+            const std::string value = readValue(i, arg, "iq");
+            if (value.empty()) {
+                std::cerr << "Missing value for --iq\n";
+                return 1;
+            }
+            iqFile = value;
+            continue;
+        }
+        if (arg == "-d" || arg == "--device" || arg.rfind("--device=", 0) == 0) {
+            const std::string value = readValue(i, arg, "device");
+            if (value.empty()) {
+                std::cerr << "Missing value for --device\n";
+                return 1;
+            }
+            audioDevice = value;
+            continue;
+        }
+        if (arg == "-P" || arg == "--password" || arg.rfind("--password=", 0) == 0) {
+            const std::string value = readValue(i, arg, "password");
+            if (value.empty()) {
+                std::cerr << "Missing value for --password\n";
+                return 1;
+            }
+            xdrPassword = value;
+            continue;
+        }
+
+        std::cerr << "Unknown option: " << arg << "\n";
+        printUsage(argv[0]);
+        return 1;
     }
 
     if (wavFile.empty() && iqFile.empty() && !enableSpeaker) {

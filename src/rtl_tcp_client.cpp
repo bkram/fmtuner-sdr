@@ -1,14 +1,83 @@
 #include "rtl_tcp_client.h"
+#if defined(_WIN32)
+#define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#endif
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <thread>
 #include <mutex>
+
+namespace {
+void closeSocket(int sock) {
+#if defined(_WIN32)
+    closesocket(static_cast<SOCKET>(sock));
+#else
+    close(sock);
+#endif
+}
+
+int lastSocketError() {
+#if defined(_WIN32)
+    return WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
+bool socketInterrupted(int err) {
+#if defined(_WIN32)
+    return err == WSAEINTR;
+#else
+    return err == EINTR;
+#endif
+}
+
+bool socketWouldBlock(int err) {
+#if defined(_WIN32)
+    return err == WSAEWOULDBLOCK || err == WSAETIMEDOUT;
+#else
+    return err == EAGAIN || err == EWOULDBLOCK;
+#endif
+}
+
+void setRecvTimeoutMs(int sock, int timeoutMs) {
+#if defined(_WIN32)
+    const DWORD timeout = timeoutMs > 0 ? static_cast<DWORD>(timeoutMs) : 0;
+    setsockopt(static_cast<SOCKET>(sock), SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+    struct timeval tv;
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+bool ensureSocketSubsystem() {
+#if defined(_WIN32)
+    static bool initialized = false;
+    static bool success = false;
+    if (!initialized) {
+        WSADATA wsaData;
+        success = (WSAStartup(MAKEWORD(2, 2), &wsaData) == 0);
+        initialized = true;
+    }
+    return success;
+#else
+    return true;
+#endif
+}
+}  // namespace
 
 RTLTCPClient::RTLTCPClient(const std::string& host, uint16_t port)
     : m_host(host)
@@ -26,6 +95,11 @@ RTLTCPClient::~RTLTCPClient() {
 }
 
 bool RTLTCPClient::connect() {
+    if (!ensureSocketSubsystem()) {
+        std::cerr << "Failed to initialize socket subsystem" << std::endl;
+        return false;
+    }
+
     struct addrinfo hints;
     std::memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -43,7 +117,7 @@ bool RTLTCPClient::connect() {
 
     m_socket = -1;
     for (struct addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
-        const int sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        const int sock = static_cast<int>(socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
         if (sock < 0) {
             continue;
         }
@@ -51,7 +125,7 @@ bool RTLTCPClient::connect() {
             m_socket = sock;
             break;
         }
-        close(sock);
+        closeSocket(sock);
     }
     freeaddrinfo(results);
 
@@ -61,30 +135,25 @@ bool RTLTCPClient::connect() {
     }
 
     // Guard initial rtl_tcp header read so connect() cannot block forever.
-    struct timeval tv;
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setRecvTimeoutMs(m_socket, 2000);
 
     uint8_t header[12];
     if (readResponse(header, sizeof(header))) {
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
-        setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setRecvTimeoutMs(m_socket, 2000);
         m_havePendingIqByte = false;
         m_connected = true;
         return true;
     }
 
     std::cerr << "Invalid response from rtl_tcp server" << std::endl;
-    close(m_socket);
+    closeSocket(m_socket);
     m_socket = -1;
     return false;
 }
 
 void RTLTCPClient::disconnect() {
     if (m_socket >= 0) {
-        close(m_socket);
+        closeSocket(m_socket);
         m_socket = -1;
     }
     m_connected = false;
@@ -98,7 +167,8 @@ bool RTLTCPClient::sendAll(const uint8_t* data, size_t len) {
 
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(m_socket, data + sent, len - sent, 0);
+        const auto n = send(m_socket, reinterpret_cast<const char*>(data + sent),
+                            static_cast<int>(len - sent), 0);
         if (n <= 0) {
             return false;
         }
@@ -126,7 +196,8 @@ bool RTLTCPClient::readResponse(uint8_t* buffer, size_t len) {
 
     size_t totalRead = 0;
     while (totalRead < len) {
-        ssize_t n = recv(m_socket, buffer + totalRead, len - totalRead, 0);
+        const auto n = recv(m_socket, reinterpret_cast<char*>(buffer + totalRead),
+                            static_cast<int>(len - totalRead), 0);
         if (n <= 0) {
             return false;
         }
@@ -152,7 +223,8 @@ size_t RTLTCPClient::readIQ(uint8_t* buffer, size_t maxSamples) {
     }
 
     while (totalRead < bytesToRead) {
-        ssize_t n = recv(m_socket, buffer + totalRead, bytesToRead - totalRead, 0);
+        const auto n = recv(m_socket, reinterpret_cast<char*>(buffer + totalRead),
+                            static_cast<int>(bytesToRead - totalRead), 0);
         if (n > 0) {
             totalRead += static_cast<size_t>(n);
             continue;
@@ -161,10 +233,11 @@ size_t RTLTCPClient::readIQ(uint8_t* buffer, size_t maxSamples) {
             m_connected = false;
             break;
         }
-        if (errno == EINTR) {
+        const int err = lastSocketError();
+        if (socketInterrupted(err)) {
             continue;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (socketWouldBlock(err)) {
             break;
         }
         break;

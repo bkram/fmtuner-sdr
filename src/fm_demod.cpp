@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <limits>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
 #endif
