@@ -24,9 +24,16 @@ jobs:
           }
         }
         $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe"
-        & $vcpkg install openssl:x64-windows liquid-dsp:x64-windows
+        & $vcpkg install openssl:x64-windows
         if ($LASTEXITCODE -ne 0) {
-          throw "Failed to install openssl/liquid-dsp via vcpkg"
+          throw "Failed to install openssl via vcpkg"
+        }
+
+        # liquid-dsp is marked unsupported on Windows in vcpkg;
+        # we still attempt install because the project requires it for current RDS path.
+        & $vcpkg install liquid-dsp:x64-windows --allow-unsupported
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to install liquid-dsp via vcpkg (with --allow-unsupported)"
         }
 
         & $vcpkg install rtlsdr:x64-windows
