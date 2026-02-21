@@ -91,8 +91,17 @@ jobs:
           mingw-w64-x86_64-ninja
           mingw-w64-x86_64-pkgconf
           mingw-w64-x86_64-openssl
-          mingw-w64-x86_64-librtlsdr
-          mingw-w64-x86_64-liquid-dsp
+          mingw-w64-x86_64-rtl-sdr
+
+    - name: Build and install liquid-dsp (MinGW-w64)
+      shell: msys2 {0}
+      run: |
+        git clone --depth 1 https://github.com/jgaeddert/liquid-dsp.git /tmp/liquid-dsp
+        cmake -S /tmp/liquid-dsp -B /tmp/liquid-dsp/build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/mingw64
+        cmake --build /tmp/liquid-dsp/build -j$(nproc)
+        cmake --install /tmp/liquid-dsp/build
 
     - name: Build (MinGW-w64)
       shell: msys2 {0}
