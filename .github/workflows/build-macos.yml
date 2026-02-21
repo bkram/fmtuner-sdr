@@ -29,8 +29,15 @@ jobs:
         cmake -S . -B build
         cmake --build build -j$(sysctl -n hw.ncpu)
 
+    - name: Package artifact
+      run: |
+        mkdir -p dist/macos
+        cp build/fm-sdr-tuner dist/macos/
+        cp README.md dist/macos/
+        cp fm-sdr-tuner.ini dist/macos/
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: fm-sdr-tuner-macos
-        path: build/fm-sdr-tuner
+        path: dist/macos

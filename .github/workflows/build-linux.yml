@@ -31,8 +31,15 @@ jobs:
         cmake -S . -B build
         cmake --build build -j$(nproc)
 
+    - name: Package artifact
+      run: |
+        mkdir -p dist/linux
+        cp build/fm-sdr-tuner dist/linux/
+        cp README.md dist/linux/
+        cp fm-sdr-tuner.ini dist/linux/
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: fm-sdr-tuner-linux-${{ matrix.artifact_suffix }}
-        path: build/fm-sdr-tuner
+        path: dist/linux

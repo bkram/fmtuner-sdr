@@ -930,7 +930,9 @@ int main(int argc, char* argv[]) {
         std::cout << "Press Ctrl+C to stop.\n";
     }
 
-    const size_t BUF_SAMPLES = useDirectRtlSdr ? 16384 : 8192;
+    // Direct RTL-SDR async callback is configured to 16384 bytes (8192 IQ samples).
+    // Using 8192-sample reads avoids deterministic "short read" logs at 256 ksps.
+    const size_t BUF_SAMPLES = 8192;
     const auto noDataSleep = useDirectRtlSdr ? std::chrono::milliseconds(2)
                                              : std::chrono::milliseconds(10);
     const auto scanRetrySleep = useDirectRtlSdr ? std::chrono::milliseconds(2)
