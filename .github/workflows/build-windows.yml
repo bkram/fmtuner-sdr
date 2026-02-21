@@ -23,7 +23,19 @@ jobs:
             throw "VCPKG_INSTALLATION_ROOT is not set and C:\vcpkg was not found."
           }
         }
-        & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:x64-windows
+        $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe"
+        & $vcpkg install openssl:x64-windows liquid-dsp:x64-windows
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to install openssl/liquid-dsp via vcpkg"
+        }
+
+        & $vcpkg install rtlsdr:x64-windows
+        if ($LASTEXITCODE -ne 0) {
+          & $vcpkg install librtlsdr:x64-windows
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install rtl-sdr package via vcpkg (tried rtlsdr and librtlsdr)"
+          }
+        }
 
     - name: Build
       shell: pwsh

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <iostream>
 
 #if defined(FM_TUNER_HAS_RTLSDR)
