@@ -70,17 +70,38 @@ jobs:
             | sort -u
         )
 
+        {
+          echo "Required MinGW DLL dependencies for build/fm-sdr-tuner.exe:"
+          ldd build/fm-sdr-tuner.exe
+          echo
+          echo "Copied DLL files:"
+        } > dist/windows-mingw/dependencies.txt
+
         for dep in "${deps[@]}"; do
           if [ -f "$dep" ]; then
             cp "$dep" dist/windows-mingw/
+            echo "$(basename "$dep") <- $dep" >> dist/windows-mingw/dependencies.txt
           fi
         done
+
+        {
+          echo
+          echo "Packaged directory contents:"
+          ls -1 dist/windows-mingw
+        } >> dist/windows-mingw/dependencies.txt
+
+        cat dist/windows-mingw/dependencies.txt
 
     - name: Smoke test packaged artifact (MinGW-w64)
       shell: msys2 {0}
       run: |
         cd dist/windows-mingw
         ./fm-sdr-tuner.exe --help
+        if ldd ./fm-sdr-tuner.exe | grep -qi "not found"; then
+          echo "ERROR: Packaged executable has missing shared library dependencies"
+          ldd ./fm-sdr-tuner.exe
+          exit 1
+        fi
 
     - name: Upload artifact (MinGW-w64)
       uses: actions/upload-artifact@v4
