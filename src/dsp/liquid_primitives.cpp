@@ -104,15 +104,15 @@ void FIRFilter::initWithTaps(const std::vector<float>& taps, float scale) {
     if (m_object != nullptr) {
         firfilt_crcf_destroy(m_object);
     }
-    m_object = firfilt_crcf_create(const_cast<float*>(taps.data()), static_cast<unsigned int>(taps.size()));
+    m_taps = taps;
+    m_object = firfilt_crcf_create(m_taps.data(), static_cast<unsigned int>(m_taps.size()));
     if (m_object == nullptr) {
         throw std::runtime_error("failed to create liquid firfilt_crcf from taps");
     }
-    m_length = static_cast<std::uint32_t>(taps.size());
+    m_length = static_cast<std::uint32_t>(m_taps.size());
     m_cutoff = 0.0f;
     m_stopBandAtten = 0.0f;
     m_center = 0.0f;
-    m_taps = taps;
     m_useDirectTaps = true;
     m_scale = scale;
     firfilt_crcf_set_scale(m_object, m_scale);

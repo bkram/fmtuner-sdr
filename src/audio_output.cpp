@@ -576,7 +576,7 @@ bool AudioOutput::initAlsa(const std::string& deviceName) {
     }
 
     if (m_verboseLogging) {
-        std::cerr << "[AUDIO] opening ALSA device: " << alsaDevice << "\n";
+        std::cout << "[AUDIO] opening ALSA device: " << alsaDevice << "\n";
     }
 
     int err = snd_pcm_open(&m_alsaPcm, alsaDevice.c_str(), SND_PCM_STREAM_PLAYBACK, 0);
@@ -631,7 +631,7 @@ bool AudioOutput::initAlsa(const std::string& deviceName) {
     snd_pcm_get_params(m_alsaPcm, &bufferSize, &periodSize);
 
     if (m_verboseLogging) {
-        std::cerr << "[AUDIO] ALSA initialized: rate=" << rate 
+        std::cout << "[AUDIO] ALSA initialized: rate=" << rate 
                   << " buffer=" << bufferSize << " (" << (bufferSize * 1000 / rate) << "ms)"
                   << " period=" << periodSize << "\n";
     }
@@ -973,7 +973,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
     if (enableSpeaker) {
         const std::string normalizedSelector = normalizeSelector(deviceSelector);
         if (verboseLogging) {
-            std::cerr << "[AUDIO] device selector raw='" << deviceSelector
+            std::cout << "[AUDIO] device selector raw='" << deviceSelector
                       << "' normalized='" << normalizedSelector << "'\n";
         }
 
@@ -1028,7 +1028,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
                     m_portAudioInitialized = false;
                     return false;
                 } else if (verboseLogging) {
-                    std::cerr << "[AUDIO] PortAudio started successfully" << std::endl;
+                    std::cout << "[AUDIO] PortAudio started successfully" << std::endl;
                 }
 
                 float primeBuffer[FRAMES_PER_BUFFER * CHANNELS] = {0.0f};
@@ -1056,7 +1056,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
     if (enableSpeaker) {
         const std::string normalizedSelector = normalizeCoreAudioSelector(deviceSelector);
         if (verboseLogging) {
-            std::cerr << "[AUDIO] coreaudio selector raw='" << deviceSelector
+            std::cout << "[AUDIO] coreaudio selector raw='" << deviceSelector
                       << "' normalized='" << normalizedSelector << "'\n";
         }
 
@@ -1148,7 +1148,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
             return false;
         }
         if (verboseLogging) {
-            std::cerr << "[AUDIO] CoreAudio started successfully\n";
+            std::cout << "[AUDIO] CoreAudio started successfully\n";
         }
     }
 #endif
@@ -1157,7 +1157,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
     if (enableSpeaker) {
         const std::string normalizedSelector = trimWinMM(deviceSelector);
         if (verboseLogging) {
-            std::cerr << "[AUDIO] winmm selector raw='" << deviceSelector
+            std::cout << "[AUDIO] winmm selector raw='" << deviceSelector
                       << "' normalized='" << normalizedSelector << "'\n";
         }
         const UINT devId = selectWinMMDevice(normalizedSelector);
@@ -1188,7 +1188,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
         m_winmmThreadRunning = true;
         m_winmmThread = std::thread(&AudioOutput::runWinMMOutputThread, this);
         if (verboseLogging) {
-            std::cerr << "[AUDIO] WinMM started successfully\n";
+            std::cout << "[AUDIO] WinMM started successfully\n";
         }
     }
 #endif
@@ -1197,7 +1197,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
     if (enableSpeaker) {
         std::string alsaDevice = deviceSelector.empty() ? "default" : deviceSelector;
         if (verboseLogging) {
-            std::cerr << "[AUDIO] device selector: " << alsaDevice << "\n";
+            std::cout << "[AUDIO] device selector: " << alsaDevice << "\n";
         }
         if (!initAlsa(alsaDevice)) {
             std::cerr << "Failed to initialize ALSA audio output" << std::endl;

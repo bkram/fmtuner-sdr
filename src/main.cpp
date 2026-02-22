@@ -534,10 +534,12 @@ int main(int argc, char* argv[]) {
 
     auto effectiveAppliedGainDb = [&]() -> int {
         if (isImsAgcEnabled()) {
-            return calculateAppliedGainDb();
+            // Tuner AGC owns front-end gain; fixed dB compensation is not valid here.
+            return 0;
         }
         return calculateAppliedGainDb();
     };
+    constexpr double kSignalGainCompFactor = 0.5;
 
     auto applyRtlGainAndAgc = [&](const char* reason) {
         if (!rtlConnected) {
@@ -696,7 +698,7 @@ int main(int argc, char* argv[]) {
 
     AudioOutput audioOut;
     if (verboseLogging) {
-        std::cerr << "[AUDIO] initializing audio output..." << std::endl;
+        std::cout << "[AUDIO] initializing audio output..." << std::endl;
     }
     const std::string& audioDeviceToUse = !audioDevice.empty() ? audioDevice : config.audio.device;
     if (!audioOut.init(enableSpeaker, wavFile, audioDeviceToUse, verboseLogging)) {
@@ -706,7 +708,7 @@ int main(int argc, char* argv[]) {
     }
     audioOut.setVolumePercent(requestedVolume.load());
     if (verboseLogging) {
-        std::cerr << "[AUDIO] audio output initialized" << std::endl;
+        std::cout << "[AUDIO] audio output initialized" << std::endl;
     }
 
     FILE* iqHandle = nullptr;
@@ -1060,7 +1062,7 @@ int main(int argc, char* argv[]) {
                     if (samples > 0) {
                         writeIqCapture(iqBuffer, samples);
                         const double powerSum = computeNormalizedIqPowerSum(iqBuffer, samples);
-                        powerAccum += powerSum / static_cast<double>(samples);
+                        powerAccum += powerSum / static_cast<double>(samples * 2);
                         validReads++;
                     }
                 }
@@ -1069,7 +1071,7 @@ int main(int argc, char* argv[]) {
                 }
                 const double avgPower = powerAccum / static_cast<double>(validReads);
                 const double dbfs = 10.0 * std::log10(avgPower + 1e-12);
-                const double gainCompDb = static_cast<double>(effectiveAppliedGainDb());
+                const double gainCompDb = static_cast<double>(effectiveAppliedGainDb()) * kSignalGainCompFactor;
                 const double compensatedDbfs = dbfs - gainCompDb;
                 const double kRfFloorDbfs = config.sdr.signal_floor_dbfs;
                 const double kRfCeilDbfs = std::max(config.sdr.signal_ceil_dbfs, kRfFloorDbfs + 1.0);
@@ -1139,11 +1141,11 @@ int main(int argc, char* argv[]) {
 
         // RF-domain strength estimate from raw IQ power before demodulation.
         const double powerSum = computeNormalizedIqPowerSum(iqBuffer, samples);
-        const double avgPower = (samples > 0) ? (powerSum / static_cast<double>(samples)) : 0.0;
+        const size_t iqCount = samples * 2;
+        const double avgPower = (iqCount > 0) ? (powerSum / static_cast<double>(iqCount)) : 0.0;
         const double dbfs = 10.0 * std::log10(avgPower + 1e-12);
         size_t hardClippedCount = 0;
         size_t nearClippedCount = 0;
-        const size_t iqCount = samples * 2;
         for (size_t i = 0; i < iqCount; i++) {
             const uint8_t v = iqBuffer[i];
             if (v <= 1 || v >= 254) {
@@ -1157,8 +1159,8 @@ int main(int argc, char* argv[]) {
         const double hardClipRatio = (iqCount > 0) ? (static_cast<double>(hardClippedCount) / static_cast<double>(iqCount)) : 0.0;
         const double nearClipRatio = (iqCount > 0) ? (static_cast<double>(nearClippedCount) / static_cast<double>(iqCount)) : 0.0;
         const double clipRatio = std::max(hardClipRatio, nearClipRatio);
-        // SDR++-style dBFS strength with gain compensation based on currently applied tuner gain.
-        const double gainCompDb = static_cast<double>(effectiveAppliedGainDb());
+        // Gain-normalize ADC-domain dBFS for a more stable RF-strength estimate.
+        const double gainCompDb = static_cast<double>(effectiveAppliedGainDb()) * kSignalGainCompFactor;
         const double compensatedDbfs = dbfs - gainCompDb;
         const double kRfFloorDbfs = config.sdr.signal_floor_dbfs;
         const double kRfCeilDbfs = std::max(config.sdr.signal_ceil_dbfs, kRfFloorDbfs + 1.0);

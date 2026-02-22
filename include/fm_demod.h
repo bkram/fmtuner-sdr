@@ -33,7 +33,6 @@ private:
     int m_outputRate;
 
     double m_deviation;
-    double m_invDeviation;
 
     bool m_deemphasisEnabled;
     int m_bandwidthMode;

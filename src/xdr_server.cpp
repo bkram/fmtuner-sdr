@@ -301,13 +301,13 @@ void XDRServer::setVerboseLogging(bool enabled) {
 
 std::string XDRServer::generateSalt() {
     static const char chars[] = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm0123456789_-";
-    const int len = strlen(chars);
+    constexpr size_t len = sizeof(chars) - 1;
     unsigned char random_data[SALT_LENGTH];
     
     if (!RAND_bytes(random_data, sizeof(random_data))) {
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(0, len - 1);
+        std::uniform_int_distribution<size_t> dis(0, len - 1);
         std::string salt;
         for (int i = 0; i < SALT_LENGTH; i++) {
             salt += chars[dis(gen)];
@@ -317,7 +317,7 @@ std::string XDRServer::generateSalt() {
     
     std::string salt;
     for (int i = 0; i < SALT_LENGTH; i++) {
-        salt += chars[random_data[i] % len];
+        salt += chars[static_cast<size_t>(random_data[i]) % len];
     }
     return salt;
 }

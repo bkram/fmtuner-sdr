@@ -31,7 +31,6 @@ FMDemod::FMDemod(int inputRate, int outputRate)
     : m_inputRate(std::max(1, inputRate))
     , m_outputRate(std::max(1, outputRate))
     , m_deviation(75000.0)
-    , m_invDeviation(0.0)
     , m_deemphasisEnabled(true)
     , m_bandwidthMode(0)
     , m_w0BandwidthHz(194000)
@@ -66,7 +65,6 @@ void FMDemod::setDeemphasis(int tau_us) {
 
 void FMDemod::setDeviation(double deviation) {
     m_deviation = deviation;
-    m_invDeviation = m_inputRate / (2.0 * static_cast<double>(kPi) * deviation); // 1/kf
     // liquid freqdem expects kf in cycles/sample; match legacy gain:
     // out = delta_phase * Fs / (2*pi*deviation)
     // => kf = deviation / Fs
