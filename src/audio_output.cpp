@@ -1028,7 +1028,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
                     m_portAudioInitialized = false;
                     return false;
                 } else if (verboseLogging) {
-                    std::cerr << "PortAudio started successfully" << std::endl;
+                    std::cerr << "[AUDIO] PortAudio started successfully" << std::endl;
                 }
 
                 float primeBuffer[FRAMES_PER_BUFFER * CHANNELS] = {0.0f};
@@ -1066,11 +1066,11 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
         desc.componentManufacturer = kAudioUnitManufacturer_Apple;
         AudioComponent component = AudioComponentFindNext(nullptr, &desc);
         if (!component) {
-            std::cerr << "CoreAudio output component not found\n";
+            std::cerr << "[AUDIO] CoreAudio output component not found\n";
             return false;
         }
         if (AudioComponentInstanceNew(component, &m_audioUnit) != noErr || !m_audioUnit) {
-            std::cerr << "CoreAudio instance creation failed\n";
+            std::cerr << "[AUDIO] CoreAudio instance creation failed\n";
             m_audioUnit = nullptr;
             return false;
         }
@@ -1078,7 +1078,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
         if (!normalizedSelector.empty()) {
             AudioDeviceID selected = selectOutputDeviceCoreAudio(normalizedSelector);
             if (selected == kAudioObjectUnknown) {
-                std::cerr << "CoreAudio device not found for selector: " << normalizedSelector << "\n";
+                std::cerr << "[AUDIO] CoreAudio device not found for selector: " << normalizedSelector << "\n";
                 listCoreAudioDevices();
                 AudioComponentInstanceDispose(m_audioUnit);
                 m_audioUnit = nullptr;
@@ -1091,7 +1091,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
                                                          &selected,
                                                          sizeof(selected));
             if (selErr != noErr) {
-                std::cerr << "CoreAudio failed to select output device (status=" << selErr << ")\n";
+                std::cerr << "[AUDIO] CoreAudio failed to select output device (status=" << selErr << ")\n";
                 AudioComponentInstanceDispose(m_audioUnit);
                 m_audioUnit = nullptr;
                 return false;
@@ -1107,7 +1107,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
                                  0,
                                  &callback,
                                  sizeof(callback)) != noErr) {
-            std::cerr << "CoreAudio set render callback failed\n";
+            std::cerr << "[AUDIO] CoreAudio set render callback failed\n";
             AudioComponentInstanceDispose(m_audioUnit);
             m_audioUnit = nullptr;
             return false;
@@ -1128,27 +1128,27 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
                                  0,
                                  &asbd,
                                  sizeof(asbd)) != noErr) {
-            std::cerr << "CoreAudio set stream format failed\n";
+            std::cerr << "[AUDIO] CoreAudio set stream format failed\n";
             AudioComponentInstanceDispose(m_audioUnit);
             m_audioUnit = nullptr;
             return false;
         }
 
         if (AudioUnitInitialize(m_audioUnit) != noErr) {
-            std::cerr << "CoreAudio initialize failed\n";
+            std::cerr << "[AUDIO] CoreAudio initialize failed\n";
             AudioComponentInstanceDispose(m_audioUnit);
             m_audioUnit = nullptr;
             return false;
         }
         if (AudioOutputUnitStart(m_audioUnit) != noErr) {
-            std::cerr << "CoreAudio start failed\n";
+            std::cerr << "[AUDIO] CoreAudio start failed\n";
             AudioUnitUninitialize(m_audioUnit);
             AudioComponentInstanceDispose(m_audioUnit);
             m_audioUnit = nullptr;
             return false;
         }
         if (verboseLogging) {
-            std::cerr << "CoreAudio started successfully\n";
+            std::cerr << "[AUDIO] CoreAudio started successfully\n";
         }
     }
 #endif
@@ -1188,7 +1188,7 @@ bool AudioOutput::init(bool enableSpeaker, const std::string& wavFile, const std
         m_winmmThreadRunning = true;
         m_winmmThread = std::thread(&AudioOutput::runWinMMOutputThread, this);
         if (verboseLogging) {
-            std::cerr << "WinMM started successfully\n";
+            std::cerr << "[AUDIO] WinMM started successfully\n";
         }
     }
 #endif

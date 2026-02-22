@@ -108,20 +108,17 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
     float attackTau = 0.120f;
     float releaseTau = 0.030f;
     float lowQualityGate = 0.85f;
-    float lockFloor = 0.02f;
-    float prelockMax = 0.30f;
+    float lockFloor = 0.00f;
     if (m_blendMode == BlendMode::Soft) {
         attackTau = 0.090f;
         releaseTau = 0.040f;
         lowQualityGate = 0.75f;
-        lockFloor = 0.08f;
-        prelockMax = 0.45f;
+        lockFloor = 0.00f;
     } else if (m_blendMode == BlendMode::Aggressive) {
         attackTau = 0.180f;
         releaseTau = 0.015f;
         lowQualityGate = 0.95f;
         lockFloor = 0.00f;
-        prelockMax = 0.18f;
     }
 
     const float blendAttack = 1.0f - std::exp(-1.0f / (attackTau * static_cast<float>(m_inputRate)));
@@ -162,15 +159,8 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
             return std::clamp(lockFloor + ((1.0f - lockFloor) * qualityShaped), 0.0f, 1.0f);
         }
 
-        const bool prelockPilot = (m_mpxMagnitude > kMpxMinAcquire) &&
-                                  (pilotMag > (kPilotAbsHold * 0.85f)) &&
-                                  (pilotRatio > kPilotRatioHold) &&
-                                  (pilotCoherence > kPilotCoherenceHold) &&
-                                  (pllErrHz < kPllLockHoldHz);
-        if (!prelockPilot) {
-            return 0.0f;
-        }
-        return std::clamp(0.02f + ((prelockMax - 0.02f) * qualityShaped), 0.0f, prelockMax);
+        // Keep output strictly mono until lock is confirmed to avoid noisy pseudo-stereo.
+        return 0.0f;
     };
 
     size_t outCount = 0;

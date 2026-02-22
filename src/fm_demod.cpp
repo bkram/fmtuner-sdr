@@ -9,6 +9,12 @@
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 6.28318530717958647692f;
+constexpr std::array<int, 30> kXdrFmBwHz = {
+    309000, 298000, 281000, 263000, 246000, 229000, 211000, 194000,
+    177000, 159000, 142000, 125000, 108000, 95000, 90000, 83000,
+    73000, 63000, 55000, 48000, 42000, 36000, 32000, 27000,
+    24000, 20000, 17000, 15000, 9000, 0
+};
 
 const std::array<float, 256>& iqNormLut() {
     static const std::array<float, 256> lut = []() {
@@ -94,18 +100,11 @@ void FMDemod::setBandwidthMode(int mode) {
 }
 
 void FMDemod::setBandwidthHz(int bwHz) {
-    static constexpr int kXdrFmBwHz[] = {
-        309000, 298000, 281000, 263000, 246000, 229000, 211000, 194000,
-        177000, 159000, 142000, 125000, 108000, 95000, 90000, 83000,
-        73000, 63000, 55000, 48000, 42000, 36000, 32000, 27000,
-        24000, 20000, 17000, 15000, 9000, 0
-    };
-
-    int selected = static_cast<int>(std::size(kXdrFmBwHz) - 1);
+    int selected = static_cast<int>(kXdrFmBwHz.size() - 1);
     if (bwHz > 0) {
         int minDiff = std::numeric_limits<int>::max();
-        for (int i = 0; i < static_cast<int>(std::size(kXdrFmBwHz)) - 1; i++) {
-            const int diff = std::abs(kXdrFmBwHz[i] - bwHz);
+        for (int i = 0; i < static_cast<int>(kXdrFmBwHz.size()) - 1; i++) {
+            const int diff = std::abs(kXdrFmBwHz[static_cast<size_t>(i)] - bwHz);
             if (diff < minDiff) {
                 minDiff = diff;
                 selected = i;
@@ -117,12 +116,17 @@ void FMDemod::setBandwidthHz(int bwHz) {
         return;
     }
     m_bandwidthMode = selected;
-    const int selectedBwHz = kXdrFmBwHz[selected];
+    const int selectedBwHz = kXdrFmBwHz[static_cast<size_t>(selected)];
+    // Parameterize liquid LPF from the mapped RF bandwidth:
+    // channel BW -> baseband half-band cutoff, clamped to available Nyquist headroom.
+    const double nyquistHeadroomHz = 0.45 * static_cast<double>(m_inputRate);
     const double iqCutoffHz = (selectedBwHz > 0)
-                                  ? std::clamp(static_cast<double>(selectedBwHz) * 0.70, 15000.0, 120000.0)
-                                  : 110000.0;
+        ? std::clamp(static_cast<double>(selectedBwHz) * 0.5, 9000.0, nyquistHeadroomHz)
+        : nyquistHeadroomHz;
     const float cutoffNorm = std::clamp(static_cast<float>(iqCutoffHz / static_cast<double>(m_inputRate)), 0.01f, 0.45f);
-    m_liquidIqFilter.init(81, cutoffNorm);
+    const std::uint32_t filterLen = (selectedBwHz > 0 && selectedBwHz <= 73000) ? 121U : 81U;
+    const float stopBandAtten = (selectedBwHz > 0 && selectedBwHz <= 42000) ? 70.0f : 60.0f;
+    m_liquidIqFilter.init(filterLen, cutoffNorm, stopBandAtten);
 }
 
 void FMDemod::setDemodMode(DemodMode mode) {

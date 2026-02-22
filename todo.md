@@ -15,32 +15,6 @@ Replace project-specific DSP implementations with `liquid-dsp` where practical, 
   - UI/client command semantics
   - Non-DSP control logic (scan/auth/network)
 
-## Phase 0: Baseline and Instrumentation
-- [ ] Freeze current reference behavior on `codex/fix/latency`.
-- [ ] Add repeatable test captures (IQ + WAV + known station set).
-- [ ] Capture baseline metrics:
-  - Audio underruns / choppiness incidents
-  - End-to-end latency (retune-to-audio, retune-to-RDS)
-  - CPU usage per platform (macOS arm64, Linux x64/arm64, Windows)
-  - RDS group rate, PI stability, error nibble distribution
-- [x] Runtime backend plumbing was implemented and used during migration.
-- [x] Backend selector removed after migration completion; runtime is now liquid-only.
-
-## Phase 1: Shared liquid-dsp Infrastructure
-- [x] Create internal wrappers for liquid primitives (AGC, NCO, FIR, resampler, PLL/symsync) similar to `redsea_port/dsp/liquid_wrappers` but app-scoped.
-- [x] Centralize DSP object lifecycle and reset semantics (retune/start/stop/scan).
-- [x] Ensure deterministic block sizes and no unbounded internal queues.
-- [x] Add compile-time guards and clear CMake errors when `liquid-dsp` is unavailable.
-
-## Phase 2: FM Demod Migration (`FMDemod`)
-- [x] Replace custom IQ prefilter + discriminator with liquid equivalents.
-- [ ] Preserve existing bandwidth command mapping (`W` behavior) via liquid filter parameterization.
-- [x] Preserve deemphasis behavior and existing output rate contract.
-- [x] Remove custom path after parity testing; liquid path is authoritative.
-- [ ] Validation criteria:
-  - No regression in choppy/fast playback
-  - Matching audio level and spectral balance within tolerance
-  - No increase in retune artifacts
 
 ## Phase 3: Stereo Decoder Migration (`StereoDecoder`)
 - [x] Replace custom pilot PLL with liquid NCO/PLL chain.

@@ -67,8 +67,7 @@ void Runtime::addResetHandler(std::function<void()> handler) {
 
 void Runtime::reset(ResetReason reason) const {
     if (m_verbose) {
-        std::cout << "[DSP] reset reason=" << resetReasonName(reason)
-                  << " backend=liquid\n";
+        std::cout << "[DSP] reset reason=" << resetReasonName(reason) << "\n";
     }
     for (const auto& handler : m_resetHandlers) {
         handler();
