@@ -29,7 +29,7 @@ jobs:
 
     - name: Build
       run: |
-        cmake -S . -B build -DFM_TUNER_ENABLE_X86_AVX2=OFF
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFM_TUNER_ENABLE_X86_AVX2=OFF
         cmake --build build -j$(nproc)
 
     - name: Build Debian package
@@ -70,7 +70,7 @@ jobs:
 
     - name: Build
       run: |
-        cmake -S . -B build -DFM_TUNER_ENABLE_X86_AVX2=OFF
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFM_TUNER_ENABLE_X86_AVX2=OFF
         cmake --build build -j$(nproc)
 
     - name: Build Debian package
