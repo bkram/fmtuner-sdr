@@ -169,6 +169,7 @@ void printUsage(const char* prog) {
               << "  -g, --gain <db>       RTL-SDR gain in dB (default: auto)\n"
               << "  -w, --wav <file>      Output WAV file\n"
               << "  -i, --iq <file>       Capture raw IQ bytes to file\n"
+              << "      --low-latency-iq  Keep newest IQ samples (drop backlog on overload)\n"
               << "  -s, --audio           Enable audio output\n"
               << "  -l, --list-audio      List available audio output devices\n"
               << "  -d, --device <id>     Audio output device (index or name)\n"
@@ -223,6 +224,7 @@ int main(int argc, char* argv[]) {
         std::cout << "[Config] processing.dsp_agc='" << config.processing.dsp_agc << "'\n";
         std::cout << "[Config] processing.stereo_blend='" << config.processing.stereo_blend << "'\n";
         std::cout << "[Config] sdr.dbf_compensation_factor=" << config.sdr.dbf_compensation_factor << "\n";
+        std::cout << "[Config] sdr.low_latency_iq=" << (config.sdr.low_latency_iq ? "true" : "false") << "\n";
     }
     std::string tcpHost = config.rtl_tcp.host;
     uint16_t tcpPort = config.rtl_tcp.port;
@@ -241,6 +243,7 @@ int main(int argc, char* argv[]) {
     bool xdrGuestMode = config.xdr.guest_mode;
     uint16_t xdrPort = config.xdr.port;
     bool autoReconnect = config.reconnection.auto_reconnect;
+    bool lowLatencyIq = config.sdr.low_latency_iq;
 
     auto parseTcpOption = [&](const std::string& value) -> bool {
         size_t colon = value.find(':');
@@ -345,6 +348,14 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-s" || arg == "--audio") {
             enableSpeaker = true;
+            continue;
+        }
+        if (arg == "--low-latency-iq") {
+            lowLatencyIq = true;
+            continue;
+        }
+        if (arg == "--no-low-latency-iq") {
+            lowLatencyIq = false;
             continue;
         }
         if (arg == "-G" || arg == "--guest") {
@@ -455,6 +466,7 @@ int main(int argc, char* argv[]) {
 
     RTLTCPClient rtlTcpClient(tcpHost, tcpPort);
     RTLSDRDevice rtlSdrDevice(rtlDeviceIndex);
+    rtlSdrDevice.setLowLatencyMode(lowLatencyIq);
     const bool useDirectRtlSdr = (tunerSource == "rtl_sdr");
     bool rtlConnected = false;
     std::atomic<uint32_t> requestedFrequencyHz(freqKHz * 1000);
@@ -472,6 +484,9 @@ int main(int argc, char* argv[]) {
     auto tunerName = [&]() -> const char* {
         return useDirectRtlSdr ? "rtl_sdr" : "rtl_tcp";
     };
+    if (verboseLogging && useDirectRtlSdr) {
+        std::cout << "[SDR] low-latency IQ mode: " << (lowLatencyIq ? "enabled" : "disabled") << "\n";
+    }
     auto tunerConnect = [&]() -> bool {
         return useDirectRtlSdr ? rtlSdrDevice.connect() : rtlTcpClient.connect();
     };

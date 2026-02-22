@@ -197,6 +197,11 @@ bool Config::loadFromFile(const std::string& filename) {
                 if (parseDouble(value, parsed)) {
                     sdr.dbf_compensation_factor = std::clamp(parsed, 0.1, 4.0);
                 }
+            } else if (key == "low_latency_iq") {
+                bool parsed = false;
+                if (parseBool(value, parsed)) {
+                    sdr.low_latency_iq = parsed;
+                }
             }
         } else if (section == "tuner") {
             if (key == "source") {

@@ -22,6 +22,7 @@ public:
     bool setGainMode(bool manual);
     bool setGain(uint32_t gainTenthsDb);
     bool setAGC(bool enable);
+    void setLowLatencyMode(bool enable);
     size_t readIQ(uint8_t* buffer, size_t maxSamples);
 
 private:
@@ -42,6 +43,7 @@ private:
     size_t m_ringReadPos;
     size_t m_ringWritePos;
     bool m_ringFull;
+    std::atomic<bool> m_lowLatencyMode;
 };
 
 #endif

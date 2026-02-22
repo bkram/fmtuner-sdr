@@ -24,6 +24,7 @@ struct Config {
         double signal_floor_dbfs = -55.0;
         double signal_ceil_dbfs = -19.0;
         double dbf_compensation_factor = 1.0;
+        bool low_latency_iq = false;
     } sdr;
 
     struct TunerSection {

@@ -40,7 +40,8 @@ RTLSDRDevice::RTLSDRDevice(uint32_t deviceIndex)
     , m_iqRing(4U * 1024U * 1024U, 0)
     , m_ringReadPos(0)
     , m_ringWritePos(0)
-    , m_ringFull(false) {
+    , m_ringFull(false)
+    , m_lowLatencyMode(false) {
 }
 
 RTLSDRDevice::~RTLSDRDevice() {
@@ -196,6 +197,10 @@ bool RTLSDRDevice::setAGC(bool enable) {
 #endif
 }
 
+void RTLSDRDevice::setLowLatencyMode(bool enable) {
+    m_lowLatencyMode.store(enable, std::memory_order_relaxed);
+}
+
 size_t RTLSDRDevice::readIQ(uint8_t* buffer, size_t maxSamples) {
 #if defined(FM_TUNER_HAS_RTLSDR)
     if (!m_connected || !m_deviceHandle || !buffer || maxSamples == 0) {
@@ -219,6 +224,15 @@ size_t RTLSDRDevice::readIQ(uint8_t* buffer, size_t maxSamples) {
     size_t available = availableBytesLocked();
     if (available == 0) {
         return 0;
+    }
+    if (m_lowLatencyMode.load(std::memory_order_relaxed) && available > requestedBytes) {
+        size_t drop = available - requestedBytes;
+        drop &= ~static_cast<size_t>(1);
+        if (drop > 0) {
+            m_ringReadPos = (m_ringReadPos + drop) % m_iqRing.size();
+            m_ringFull = false;
+            available = availableBytesLocked();
+        }
     }
     size_t bytesToRead = std::min(available, requestedBytes);
     bytesToRead &= ~static_cast<size_t>(1);
