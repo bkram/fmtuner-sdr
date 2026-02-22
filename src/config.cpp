@@ -93,7 +93,6 @@ void Config::loadDefaults() {
     tuner = TunerSection{};
     xdr = XDRSection{};
     processing = ProcessingSection{};
-    rds = RDSSection{};
     debug = DebugSection{};
     reconnection = ReconnectionSection{};
 }
@@ -260,11 +259,6 @@ bool Config::loadFromFile(const std::string& filename) {
                 bool parsed = false;
                 if (parseBool(value, parsed)) {
                     processing.stereo = parsed;
-                }
-            } else if (key == "rds") {
-                bool parsed = false;
-                if (parseBool(value, parsed)) {
-                    processing.rds = parsed;
                 }
             }
         } else if (section == "debug") {

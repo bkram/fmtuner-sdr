@@ -876,26 +876,6 @@ int main(int argc, char* argv[]) {
 
     std::thread rdsThread([&]() {
         RDSDecoder rds(INPUT_RATE);
-        std::string rdsAggressiveness = config.rds.aggressiveness;
-        std::transform(rdsAggressiveness.begin(), rdsAggressiveness.end(), rdsAggressiveness.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        if (rdsAggressiveness == "strict") {
-            rds.setAggressiveness(RDSDecoder::Aggressiveness::Strict);
-        } else if (rdsAggressiveness == "loose") {
-            rds.setAggressiveness(RDSDecoder::Aggressiveness::Loose);
-        } else {
-            rds.setAggressiveness(RDSDecoder::Aggressiveness::Balanced);
-        }
-        rds.setAgcCoefficients(config.rds.agc_attack, config.rds.agc_release);
-        rds.setLockThresholds(config.rds.lock_acquire_groups, config.rds.lock_loss_groups);
-        if (verboseLogging) {
-            std::cout << "[RDS] agc_attack=" << config.rds.agc_attack
-                      << " agc_release=" << config.rds.agc_release
-                      << " lock_acquire_groups=" << config.rds.lock_acquire_groups
-                      << " lock_loss_groups=" << config.rds.lock_loss_groups
-                      << "\n";
-        }
         while (!rdsStop.load()) {
             std::vector<float> block;
             bool doReset = false;

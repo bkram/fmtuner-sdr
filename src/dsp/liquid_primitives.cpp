@@ -1,5 +1,6 @@
 #include "dsp/liquid_primitives.h"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace fm_tuner::dsp::liquid {
@@ -51,19 +52,48 @@ void FIRFilter::init(std::uint32_t length, float cutoff, float stopBandAtten, fl
     if (m_object != nullptr) {
         firfilt_crcf_destroy(m_object);
     }
-    m_object = firfilt_crcf_create_kaiser(length, cutoff, stopBandAtten, center);
-    if (m_object == nullptr) {
-        throw std::runtime_error("failed to create liquid firfilt_crcf");
-    }
     m_length = length;
     m_cutoff = cutoff;
     m_stopBandAtten = stopBandAtten;
     m_center = center;
-    m_taps.clear();
     m_useDirectTaps = false;
-    // For low-pass filters, normalize DC gain near unity.
-    // For shifted filters (e.g. band-pass via non-zero center), keep native scaling.
-    m_scale = (std::abs(m_center) < 1e-6f) ? (2.0f * m_cutoff) : 1.0f;
+
+    if (std::abs(m_center) < 1e-6f) {
+        m_object = firfilt_crcf_create_kaiser(length, cutoff, stopBandAtten, 0.0f);
+        if (m_object == nullptr) {
+            throw std::runtime_error("failed to create liquid firfilt_crcf");
+        }
+        m_taps.clear();
+        m_scale = 2.0f * m_cutoff;
+        firfilt_crcf_set_scale(m_object, m_scale);
+        return;
+    }
+
+    m_taps.assign(length, 0.0f);
+    if (liquid_firdes_kaiser(length, cutoff, stopBandAtten, 0.0f, m_taps.data()) != LIQUID_OK) {
+        throw std::runtime_error("failed to design liquid kaiser taps");
+    }
+    const int mid = static_cast<int>(length / 2);
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    for (std::uint32_t n = 0; n < length; ++n) {
+        const float phase = kTwoPi * m_center * static_cast<float>(static_cast<int>(n) - mid);
+        m_taps[n] = 2.0f * m_taps[n] * std::cos(phase);
+    }
+    double sumAbs = 0.0;
+    for (float tap : m_taps) {
+        sumAbs += std::abs(tap);
+    }
+    if (sumAbs > 1e-12) {
+        const float invSumAbs = static_cast<float>(1.0 / sumAbs);
+        for (float& tap : m_taps) {
+            tap *= invSumAbs;
+        }
+    }
+    m_object = firfilt_crcf_create(m_taps.data(), length);
+    if (m_object == nullptr) {
+        throw std::runtime_error("failed to create liquid firfilt_crcf from shifted taps");
+    }
+    m_scale = 1.0f;
     firfilt_crcf_set_scale(m_object, m_scale);
 }
 

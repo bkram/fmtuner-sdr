@@ -44,13 +44,23 @@ StereoDecoder::StereoDecoder(int inputRate, int /*outputRate*/)
     , m_delayPos(0)
     , m_delaySamples(0)
 {
-    m_pilotTaps = designBandPass(18750.0, 19250.0, 3000.0);
-    m_liquidPilotBandFilter.initWithTaps(m_pilotTaps, 1.0f);
+    constexpr float pilotCenterHz = 19000.0f;
+    constexpr float pilotHalfBandwidthHz = 250.0f;
+    constexpr float pilotTransitionHz = 3000.0f;
+    int pilotTapCount = static_cast<int>(std::ceil(3.8 * static_cast<double>(m_inputRate) /
+                                                    static_cast<double>(pilotTransitionHz)));
+    pilotTapCount = std::clamp(pilotTapCount, 63, 511);
+    if ((pilotTapCount % 2) == 0) {
+        pilotTapCount++;
+    }
+    const float pilotCenterNorm = std::clamp(pilotCenterHz / static_cast<float>(m_inputRate), 0.001f, 0.49f);
+    const float pilotCutoffNorm = std::clamp(pilotHalfBandwidthHz / static_cast<float>(m_inputRate), 0.0005f, 0.45f);
+    m_liquidPilotBandFilter.init(static_cast<std::uint32_t>(pilotTapCount), pilotCutoffNorm, 60.0f, pilotCenterNorm);
     const float audioCutoffNorm = std::clamp(15000.0f / static_cast<float>(m_inputRate), 0.01f, 0.45f);
     m_liquidLeftAudioFilter.init(121, audioCutoffNorm);
     m_liquidRightAudioFilter.init(121, audioCutoffNorm);
 
-    m_delaySamples = static_cast<int>((m_pilotTaps.size() > 0) ? ((m_pilotTaps.size() - 1) / 2) : 0);
+    m_delaySamples = std::max(0, (pilotTapCount - 1) / 2);
     m_delayLine.assign(static_cast<size_t>(std::max(1, m_delaySamples + 1)), 0.0f);
     const float nominalPllFreq = 2.0f * kPi * 19000.0f / static_cast<float>(m_inputRate);
     m_liquidPilotPll.init(LIQUID_VCO, nominalPllFreq);
@@ -254,48 +264,4 @@ size_t StereoDecoder::processAudio(const float* mono, float* left, float* right,
     const float calibrated = m_pilotMagnitude * 8.0f;
     m_pilotLevelTenthsKHz = std::clamp(static_cast<int>(std::round(calibrated * 750.0f)), 0, 750);
     return outCount;
-}
-
-std::vector<float> StereoDecoder::designBandPass(double lowHz, double highHz, double transitionHz) const {
-    int tapCount = static_cast<int>(std::ceil(3.8 * static_cast<double>(m_inputRate) / transitionHz));
-    tapCount = std::clamp(tapCount, 63, 511);
-    if ((tapCount % 2) == 0) {
-        tapCount++;
-    }
-
-    std::vector<float> taps(static_cast<size_t>(tapCount), 0.0f);
-    const int mid = tapCount / 2;
-    const double fs = static_cast<double>(m_inputRate);
-    double sumAbs = 0.0;
-
-    for (int n = 0; n < tapCount; n++) {
-        const int m = n - mid;
-        double h = 0.0;
-        if (m == 0) {
-            h = 2.0 * (highHz - lowHz) / fs;
-        } else {
-            const double mm = static_cast<double>(m);
-            h = (std::sin(2.0 * kPi * highHz * mm / fs) - std::sin(2.0 * kPi * lowHz * mm / fs)) / (kPi * mm);
-        }
-        h *= windowNuttall(n, tapCount);
-        taps[static_cast<size_t>(n)] = static_cast<float>(h);
-        sumAbs += std::abs(h);
-    }
-
-    if (sumAbs > 1e-12) {
-        const float norm = static_cast<float>(1.0 / sumAbs);
-        for (float& tap : taps) {
-            tap *= norm;
-        }
-    }
-
-    return taps;
-}
-
-float StereoDecoder::windowNuttall(int n, int count) const {
-    const double x = 2.0 * kPi * static_cast<double>(n) / static_cast<double>(count - 1);
-    return static_cast<float>(0.355768
-                            - 0.487396 * std::cos(x)
-                            + 0.144232 * std::cos(2.0 * x)
-                            - 0.012604 * std::cos(3.0 * x));
 }

@@ -28,9 +28,6 @@ public:
     bool isStereo() const { return m_stereoDetected; }
 
 private:
-    std::vector<float> designBandPass(double lowHz, double highHz, double transitionHz) const;
-    float windowNuttall(int n, int count) const;
-
     int m_inputRate;
     bool m_stereoDetected;
     bool m_forceStereo;
@@ -50,7 +47,6 @@ private:
     float m_pllMaxFreq;
     int m_pilotCount;
     int m_pilotLossCount;
-    std::vector<float> m_pilotTaps;
 
     std::vector<float> m_delayLine;
     size_t m_delayPos;

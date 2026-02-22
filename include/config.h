@@ -45,16 +45,7 @@ struct Config {
         int w0_bandwidth_hz = 194000;
         std::string stereo_blend = "normal";
         bool stereo = true;
-        bool rds = true;
     } processing;
-
-    struct RDSSection {
-        std::string aggressiveness = "balanced";
-        float agc_attack = 0.995f;
-        float agc_release = 0.9995f;
-        int lock_acquire_groups = 2;
-        int lock_loss_groups = 12;
-    } rds;
 
     struct DebugSection {
         int log_level = 1;
