@@ -7,24 +7,25 @@ on:
     branches: [main, master]
 
 jobs:
-  build:
+  build-ubuntu-24-04:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
-            artifact_suffix: x64
+          - runner: ubuntu-24.04
+            arch: x64
           - runner: ubuntu-24.04-arm
-            artifact_suffix: arm64
+            arch: arm64
 
     steps:
     - uses: actions/checkout@v4
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake pkg-config librtlsdr-dev libusb-1.0-0-dev libssl-dev libasound2-dev libliquid-dev
+        if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+        $SUDO apt-get update
+        $SUDO apt-get install -y cmake pkg-config librtlsdr-dev libusb-1.0-0-dev libssl-dev libasound2-dev libliquid-dev
 
     - name: Build
       run: |
@@ -43,5 +44,46 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: fm-sdr-tuner-linux-deb-${{ matrix.artifact_suffix }}
+        name: fm-sdr-tuner-linux-deb-ubuntu-24.04-${{ matrix.arch }}
+        path: dist/linux
+
+  build-debian-trixie:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    container: debian:trixie
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+        $SUDO apt-get update
+        $SUDO apt-get install -y cmake pkg-config librtlsdr-dev libusb-1.0-0-dev libssl-dev libasound2-dev libliquid-dev
+
+    - name: Build
+      run: |
+        cmake -S . -B build -DFM_TUNER_ENABLE_X86_AVX2=OFF
+        cmake --build build -j$(nproc)
+
+    - name: Build Debian package
+      run: |
+        cd build
+        cpack -G DEB
+        mkdir -p ../dist/linux
+        cp ./*.deb ../dist/linux/
+        cp ../README.md ../dist/linux/
+        cp ../fm-sdr-tuner.ini ../dist/linux/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fm-sdr-tuner-linux-deb-debian-trixie-${{ matrix.arch }}
         path: dist/linux
