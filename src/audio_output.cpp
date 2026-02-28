@@ -628,25 +628,26 @@ bool AudioOutput::initAlsa(const std::string &deviceName) {
   snd_pcm_hw_params_set_format(m_alsaPcm, hwparams, SND_PCM_FORMAT_S16_LE);
   snd_pcm_hw_params_set_channels(m_alsaPcm, hwparams, CHANNELS);
 
+  // Keep the internal DSP/audio pipeline at fixed 32 kHz and let ALSA plug
+  // layer resample when needed.
+  snd_pcm_hw_params_set_rate_resample(m_alsaPcm, hwparams, 1);
   unsigned int rate = SAMPLE_RATE;
-  int dir = 0;
-  err = snd_pcm_hw_params_set_rate_near(m_alsaPcm, hwparams, &rate, &dir);
+  err = snd_pcm_hw_params_set_rate(m_alsaPcm, hwparams, rate, 0);
   if (err < 0) {
-    std::cerr << "[AUDIO] ALSA set_rate failed: " << snd_strerror(err) << "\n";
+    std::cerr << "[AUDIO] ALSA exact " << SAMPLE_RATE
+              << " Hz rate not available on device '" << alsaDevice
+              << "': " << snd_strerror(err)
+              << ". Use 'default' or 'plughw:X,Y'.\n";
     snd_pcm_close(m_alsaPcm);
     m_alsaPcm = nullptr;
     return false;
-  }
-
-  if (rate != SAMPLE_RATE && m_verboseLogging) {
-    std::cerr << "[AUDIO] ALSA rate " << SAMPLE_RATE << " not supported, using "
-              << rate << " (will resample)\n";
   }
 
   snd_pcm_uframes_t bufferSize = 16384;
   snd_pcm_hw_params_set_buffer_size_near(m_alsaPcm, hwparams, &bufferSize);
 
   snd_pcm_uframes_t periodSize = 2048;
+  int dir = 0;
   snd_pcm_hw_params_set_period_size_near(m_alsaPcm, hwparams, &periodSize,
                                          &dir);
 
