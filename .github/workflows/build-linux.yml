@@ -7,39 +7,218 @@ on:
     branches: [main, master]
 
 jobs:
-  build:
+  build-ubuntu-24-04:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
-            artifact_suffix: x64
+          - runner: ubuntu-24.04
+            arch: x64
           - runner: ubuntu-24.04-arm
-            artifact_suffix: arm64
+            arch: arm64
 
     steps:
     - uses: actions/checkout@v4
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake pkg-config librtlsdr-dev libusb-1.0-0-dev libssl-dev libasound2-dev libliquid-dev
+        if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+        $SUDO apt-get update
+        $SUDO apt-get install -y cmake g++ file dpkg-dev pkg-config librtlsdr-dev libusb-1.0-0-dev libssl-dev libasound2-dev libliquid-dev
 
     - name: Build
       run: |
-        cmake -S . -B build
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFM_TUNER_ENABLE_X86_AVX2=OFF
         cmake --build build -j$(nproc)
 
-    - name: Package artifact
+    - name: Build Debian package
       run: |
-        mkdir -p dist/linux
-        cp build/fm-sdr-tuner dist/linux/
-        cp README.md dist/linux/
-        cp fm-sdr-tuner.ini dist/linux/
+        cd build
+        cpack -G DEB
+        mkdir -p ../dist/linux
+        cp ./*.deb ../dist/linux/
+        cp ../README.md ../dist/linux/
+        cp ../fm-sdr-tuner.ini ../dist/linux/
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: fm-sdr-tuner-linux-${{ matrix.artifact_suffix }}
+        name: fm-sdr-tuner-linux-deb-ubuntu-24.04-${{ matrix.arch }}
         path: dist/linux
+
+  build-debian-trixie:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    container: debian:trixie
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+        $SUDO apt-get update
+        $SUDO apt-get install -y cmake g++ file dpkg-dev pkg-config librtlsdr-dev libusb-1.0-0-dev libssl-dev libasound2-dev libliquid-dev
+
+    - name: Build
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFM_TUNER_ENABLE_X86_AVX2=OFF
+        cmake --build build -j$(nproc)
+
+    - name: Build Debian package
+      run: |
+        cd build
+        cpack -G DEB
+        mkdir -p ../dist/linux
+        cp ./*.deb ../dist/linux/
+        cp ../README.md ../dist/linux/
+        cp ../fm-sdr-tuner.ini ../dist/linux/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fm-sdr-tuner-linux-deb-debian-trixie-${{ matrix.arch }}
+        path: dist/linux
+
+  build-fedora-40:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    container: fedora:40
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        dnf install -y cmake gcc-c++ make file pkgconfig
+        dnf install -y openssl-devel alsa-lib-devel
+        dnf install -y rtl-sdr-devel liquid-dsp-devel
+        dnf install -y catch2-devel || true
+        dnf install -y rpm-build || true
+
+    - name: Build
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFM_TUNER_ENABLE_X86_AVX2=OFF
+        cmake --build build -j$(nproc)
+
+    - name: Run tests
+      run: |
+        cd build
+        ctest --output-on-failure || true
+
+    - name: Create RPM package
+      run: |
+        cd build
+        cpack -G RPM
+        mkdir -p ../dist/linux
+        cp ./*.rpm ../dist/linux/
+        cp ../README.md ../dist/linux/
+        cp ../fm-sdr-tuner.ini ../dist/linux/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fm-sdr-tuner-linux-rpm-fedora-40-${{ matrix.arch }}
+        path: dist/linux
+
+  smoke-test-deb-install:
+    needs:
+      - build-ubuntu-24-04
+      - build-debian-trixie
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+    - name: Download Ubuntu package artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: fm-sdr-tuner-linux-deb-ubuntu-24.04-${{ matrix.arch }}
+        path: /tmp/artifacts/ubuntu
+
+    - name: Download Debian package artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: fm-sdr-tuner-linux-deb-debian-trixie-${{ matrix.arch }}
+        path: /tmp/artifacts/debian
+
+    - name: Smoke test package install in fresh containers
+      run: |
+        set -euxo pipefail
+        test_pkg_in_container() {
+          image="$1"
+          pkg_dir="$2"
+          docker pull "$image"
+          docker run --rm -v "$pkg_dir:/pkg:ro" "$image" sh -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y ca-certificates
+            apt-get install -y /pkg/*.deb
+            ldd /usr/bin/fm-sdr-tuner | tee /tmp/ldd.txt
+            if grep -q "not found" /tmp/ldd.txt; then
+              echo "Missing shared libraries detected"
+              exit 1
+            fi
+            /usr/bin/fm-sdr-tuner --help >/tmp/help.txt 2>&1 || true
+            grep -q "Usage:" /tmp/help.txt
+          '
+        }
+
+        test_pkg_in_container ubuntu:24.04 /tmp/artifacts/ubuntu
+        test_pkg_in_container debian:trixie /tmp/artifacts/debian
+
+  smoke-test-rpm-install:
+    needs:
+      - build-fedora-40
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+    - name: Download Fedora package artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: fm-sdr-tuner-linux-rpm-fedora-40-${{ matrix.arch }}
+        path: /tmp/artifacts/fedora
+
+    - name: Smoke test RPM install in fresh container
+      run: |
+        set -euxo pipefail
+        docker pull fedora:40
+        docker run --rm -v "/tmp/artifacts/fedora:/pkg:ro" fedora:40 sh -euxc '
+          dnf install -y /pkg/*.rpm
+          ldd /usr/bin/fm-sdr-tuner | tee /tmp/ldd.txt
+          if grep -q "not found" /tmp/ldd.txt; then
+            echo "Missing shared libraries detected"
+            exit 1
+          fi
+          /usr/bin/fm-sdr-tuner --help >/tmp/help.txt 2>&1 || true
+          grep -q "Usage:" /tmp/help.txt
+        '

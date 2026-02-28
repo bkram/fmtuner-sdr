@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.15)
-project(fm-sdr-tuner VERSION 1.0.0 LANGUAGES CXX)
+project(fm-sdr-tuner VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include(CheckCXXCompilerFlag)
+include(GNUInstallDirs)
 
 option(FM_TUNER_ENABLE_X86_AVX2 "Enable AVX2/FMA compile flags on x86 targets" ON)
 set(FM_TUNER_DEFAULT_PORTAUDIO OFF)
@@ -163,6 +164,7 @@ set(SOURCES
     src/xdr_server.cpp
     src/audio_output.cpp
     src/config.cpp
+    src/signal_level.cpp
     src/main.cpp
 )
 
@@ -258,4 +260,36 @@ if(APPLE)
     )
 endif()
 
-install(TARGETS fm-sdr-tuner DESTINATION bin)
+install(TARGETS fm-sdr-tuner RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES fm-sdr-tuner.ini DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/fm-sdr-tuner RENAME fm-sdr-tuner.ini.example)
+install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+set(CPACK_PACKAGE_NAME "fm-sdr-tuner")
+set(CPACK_PACKAGE_VENDOR "Bkram Developments")
+set(CPACK_PACKAGE_CONTACT "maintainers@bkram.dev")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "FM broadcast tuner and XDR server for RTL-SDR")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+set(CPACK_STRIP_FILES ON)
+
+if(UNIX AND NOT APPLE)
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Bkram Developments")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "hamradio")
+    set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libliquid1, librtlsdr0 | librtlsdr2, rtl-sdr")
+endif()
+
+include(CPack)
+
+# Tests
+enable_testing()
+find_package(Catch2 3 QUIET)
+if(Catch2_FOUND)
+    message(STATUS "Catch2 found, enabling tests")
+    add_subdirectory(tests)
+else()
+    message(STATUS "Catch2 not found, tests disabled. Install with: brew install catch2")
+endif()
