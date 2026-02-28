@@ -74,32 +74,31 @@
 
 ## Priority Recommendations
 
-1. **Immediate**: Fix memory leak in xdr_server.cpp SHA1 usage
-2. **Immediate**: Add null checks for device/file handles
-3. **High**: Refactor main.cpp into smaller modules/functions
-4. **High**: Abstract audio output behind interface
-5. **Medium**: Add const-correctness where appropriate
-6. **Medium**: Replace magic numbers with named constants
+1. ✅ ~~Fix memory leak in xdr_server.cpp SHA1 usage~~ - Done
+2. ✅ ~~Add null checks for device/file handles~~ - Verified correct
+3. ✅ ~~Refactor main.cpp into smaller modules/functions~~ - Extracted signal_level
+4. ✅ ~~Add const-correctness where appropriate~~ - Verified correct
+5. ✅ ~~Replace magic numbers with named constants~~ - Done
+6. **High**: Abstract audio output behind interface
 7. **Low**: Standardize naming conventions
 
 ---
 
-## clang-tidy Findings (~41,000 warnings)
+## Completed
 
-### Critical (Errors)
-- Missing headers (false positives): OpenSSL, liquid - build system issues
+- [x] Code formatting (clang-format)
+- [x] Config cognitive complexity (204→25)
+- [x] Magic numbers → constants
+- [x] Short variable names expanded
+- [x] Extract signal_level module (-200 lines from main.cpp)
+- [x] SHA1 error handling
 
-### High Priority Fixes
-- **src/config.cpp:100**: Function cognitive complexity 204 (threshold 25) - refactor
-- **src/af_post_processor.cpp:59-65**: Uninitialized variables (`leftProduced`, `rightProduced`, `left`, `right`)
-- **src/audio_output.cpp:1314**: Potential null pointer dereference
-- **src/audio_output.cpp:1266**: Assigning owner to non-owner (FILE*)
+---
 
-### Medium Priority Fixes
-- **Magic numbers**: Replace with named constants
-  - `75` (deemphasis tau) - af_post_processor.cpp:17
-  - `100` (volume/buffer) - audio_output.cpp:930, 1262
-  - `65536` - audio_output.cpp:953
+## Remaining
+
+- Abstract audio output (significant refactor)
+- Naming conventions (low priority)
   - `32767.0f` - audio_output.cpp:1316-1317
   - `0.85f`, `1e-6f` - audio_output.cpp:931, 1375
 - **Short variable names**: Expand to meaningful names

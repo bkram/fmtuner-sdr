@@ -283,3 +283,13 @@ if(UNIX AND NOT APPLE)
 endif()
 
 include(CPack)
+
+# Tests
+enable_testing()
+find_package(Catch2 3 QUIET)
+if(Catch2_FOUND)
+    message(STATUS "Catch2 found, enabling tests")
+    add_subdirectory(tests)
+else()
+    message(STATUS "Catch2 not found, tests disabled. Install with: brew install catch2")
+endif()

@@ -89,7 +89,7 @@ bool parseDouble(const std::string &raw, double &out) {
 }
 
 void parseRtlTcpSection(const std::string &key, const std::string &value,
-                         Config::Config::RTLTCPSection &rtl_tcp) {
+                        Config::Config::RTLTCPSection &rtl_tcp) {
   if (key == "host") {
     rtl_tcp.host = value;
   } else if (key == "port") {

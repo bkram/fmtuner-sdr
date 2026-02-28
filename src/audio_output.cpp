@@ -985,7 +985,8 @@ void AudioOutput::runWinMMOutputThread() {
 AudioOutput::AudioOutput()
     : m_enableSpeaker(false), m_wavHandle(nullptr), m_running(false),
       m_wavDataSize(0), m_writeIndex(0), m_readIndex(0), m_verboseLogging(true),
-      m_requestedVolumePercent(kMaxVolumePercent), m_currentVolumeScale(kDefaultVolumeScale)
+      m_requestedVolumePercent(kMaxVolumePercent),
+      m_currentVolumeScale(kDefaultVolumeScale)
 #if defined(FM_TUNER_HAS_PORTAUDIO)
       ,
       m_paStream(nullptr), m_portAudioInitialized(false),
@@ -1324,8 +1325,9 @@ void AudioOutput::shutdown() {
 }
 
 void AudioOutput::setVolumePercent(int volumePercent) {
-  m_requestedVolumePercent.store(std::clamp(volumePercent, 0, kMaxVolumePercent),
-                                 std::memory_order_relaxed);
+  m_requestedVolumePercent.store(
+      std::clamp(volumePercent, 0, kMaxVolumePercent),
+      std::memory_order_relaxed);
 }
 
 bool AudioOutput::initWAV(const std::string &filename) {

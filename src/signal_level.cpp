@@ -1,9 +1,9 @@
 #include "signal_level.h"
 
+#include "cpu_features.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include "cpu_features.h"
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) ||             \
     defined(_M_IX86)
@@ -35,7 +35,7 @@ namespace {
 #endif
 
 double computeNormalizedIqPowerSumScalar(const uint8_t *iq, size_t count,
-                                       const float *lut) {
+                                         const float *lut) {
   double powerSum = 0.0;
   size_t i = 0;
   for (; i + 4 <= count; i += 4) {
@@ -51,9 +51,9 @@ double computeNormalizedIqPowerSumScalar(const uint8_t *iq, size_t count,
 }
 
 #if SIGLEV_HAS_AVX2
-SIGLEV_AVX2_TARGET double
-computeNormalizedIqPowerSumAvx2(const uint8_t *iq, size_t count,
-                               const float *lut) {
+SIGLEV_AVX2_TARGET double computeNormalizedIqPowerSumAvx2(const uint8_t *iq,
+                                                          size_t count,
+                                                          const float *lut) {
   __m256 acc = _mm256_setzero_ps();
   size_t i = 0;
   for (; i + 8 <= count; i += 8) {
@@ -66,7 +66,7 @@ computeNormalizedIqPowerSumAvx2(const uint8_t *iq, size_t count,
   alignas(32) float lanes[8];
   _mm256_store_ps(lanes, acc);
   double powerSum = lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] +
-                   lanes[5] + lanes[6] + lanes[7];
+                    lanes[5] + lanes[6] + lanes[7];
   for (; i < count; i++) {
     powerSum += lut[iq[i]];
   }
@@ -143,9 +143,9 @@ double computeNormalizedIqPowerSum(const uint8_t *iq, size_t samples) {
 } // namespace
 
 SignalLevelResult computeSignalLevel(const uint8_t *iq, size_t samples,
-                                    int appliedGainDb, double gainCompFactor,
-                                    double signalBiasDb, double floorDbfs,
-                                    double ceilDbfs) {
+                                     int appliedGainDb, double gainCompFactor,
+                                     double signalBiasDb, double floorDbfs,
+                                     double ceilDbfs) {
   SignalLevelResult out{};
   if (!iq || samples == 0) {
     return out;
