@@ -306,10 +306,18 @@ std::string XDRServer::computeSHA1(const std::string &salt,
   unsigned char sha[SHA_DIGEST_LENGTH];
   SHA_CTX ctx;
 
-  SHA1_Init(&ctx);
-  SHA1_Update(&ctx, salt.c_str(), salt.length());
-  SHA1_Update(&ctx, password.c_str(), password.length());
-  SHA1_Final(sha, &ctx);
+  if (!SHA1_Init(&ctx)) {
+    return {};
+  }
+  if (!SHA1_Update(&ctx, salt.c_str(), salt.length())) {
+    return {};
+  }
+  if (!SHA1_Update(&ctx, password.c_str(), password.length())) {
+    return {};
+  }
+  if (!SHA1_Final(sha, &ctx)) {
+    return {};
+  }
 
   char sha_string[SHA_DIGEST_LENGTH * 2 + 1];
   for (int i = 0; i < SHA_DIGEST_LENGTH; i++) {
