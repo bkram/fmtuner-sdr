@@ -158,6 +158,11 @@ bool Config::loadFromFile(const std::string& filename) {
                 if (parseBool(value, parsed)) {
                     audio.enable_audio = parsed;
                 }
+            } else if (key == "startup_volume") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    audio.startup_volume = std::clamp(parsed, 0, 100);
+                }
             }
         } else if (section == "sdr") {
             if (key == "rtl_gain_db") {

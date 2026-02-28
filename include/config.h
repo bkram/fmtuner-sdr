@@ -14,6 +14,7 @@ struct Config {
     struct AudioSection {
         std::string device;
         bool enable_audio = false;
+        int startup_volume = 100;
     } audio;
 
     struct SDRSection {

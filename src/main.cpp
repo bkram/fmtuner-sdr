@@ -221,6 +221,7 @@ int main(int argc, char* argv[]) {
     }
     if (verboseLogging) {
         std::cout << "[Config] audio.device='" << config.audio.device << "'\n";
+        std::cout << "[Config] audio.startup_volume=" << config.audio.startup_volume << "\n";
         std::cout << "[Config] processing.dsp_block_samples=" << config.processing.dsp_block_samples << "\n";
         std::cout << "[Config] processing.w0_bandwidth_hz=" << config.processing.w0_bandwidth_hz << "\n";
         std::cout << "[Config] processing.dsp_agc='" << config.processing.dsp_agc << "'\n";
@@ -504,7 +505,7 @@ int main(int argc, char* argv[]) {
     std::atomic<int> requestedCustomGain(defaultCustomGainFlags);
     std::atomic<int> requestedAGCMode(std::clamp(config.processing.agc_mode, 0, 3));
     std::atomic<int> requestedBandwidthHz(0);
-    std::atomic<int> requestedVolume(100);
+    std::atomic<int> requestedVolume(std::clamp(config.audio.startup_volume, 0, 100));
     std::atomic<int> requestedDeemphasis(std::clamp(config.tuner.deemphasis, 0, 2));
     std::atomic<bool> requestedForceMono(false);
     std::atomic<bool> pendingFrequency(false);
