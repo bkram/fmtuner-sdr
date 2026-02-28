@@ -642,10 +642,12 @@ bool AudioOutput::initAlsa(const std::string &deviceName) {
               << rate << " (will resample)\n";
   }
 
-  snd_pcm_uframes_t bufferSize = 16384;
+  // Lower-latency target: ~128 ms device buffer at 32 kHz.
+  snd_pcm_uframes_t bufferSize = 4096;
   snd_pcm_hw_params_set_buffer_size_near(m_alsaPcm, hwparams, &bufferSize);
 
-  snd_pcm_uframes_t periodSize = 2048;
+  // Lower-latency target: ~16 ms period at 32 kHz.
+  snd_pcm_uframes_t periodSize = 512;
   snd_pcm_hw_params_set_period_size_near(m_alsaPcm, hwparams, &periodSize,
                                          &dir);
 
@@ -1470,8 +1472,9 @@ bool AudioOutput::write(const float *left, const float *right,
 #if defined(__linux__) && defined(FM_TUNER_HAS_ALSA)
   if (m_enableSpeaker && m_alsaPcm) {
     std::lock_guard<std::mutex> lock(m_alsaMutex);
+    // App-side queue cap of ~0.5 s to prevent large latency buildup.
     constexpr size_t kMaxQueuedSamples =
-        static_cast<size_t>(SAMPLE_RATE) * CHANNELS * 2;
+        (static_cast<size_t>(SAMPLE_RATE) * CHANNELS) / 2;
     const size_t queuedSamples = (m_alsaBuffer.size() > m_alsaReadIndex)
                                      ? (m_alsaBuffer.size() - m_alsaReadIndex)
                                      : 0;
