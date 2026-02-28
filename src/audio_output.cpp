@@ -1001,9 +1001,7 @@ AudioOutput::AudioOutput()
 #endif
 #if defined(__linux__) && defined(FM_TUNER_HAS_ALSA)
       ,
-      m_alsaPcm(nullptr), m_alsaThreadRunning(false), m_alsaReadIndex(0),
-      m_alsaChannels(CHANNELS), m_alsaSampleRate(SAMPLE_RATE),
-      m_alsaSourcePerDest(1.0f), m_alsaResamplePhase(0.0f)
+      m_alsaPcm(nullptr), m_alsaThreadRunning(false), m_alsaReadIndex(0)
 #endif
 {
   m_circularBuffer.resize(kCircularBufferSize * 2);
