@@ -19,13 +19,14 @@ struct Config {
 
     struct SDRSection {
         int rtl_gain_db = -1;
+        int freq_correction_ppm = 0;
         int default_custom_gain_flags = 0;
         std::string gain_strategy = "tef"; // tef|sdrpp
         bool sdrpp_rtl_agc = false;
         int sdrpp_rtl_agc_gain_db = 18;
         double signal_floor_dbfs = -55.0;
         double signal_ceil_dbfs = -19.0;
-        double dbf_compensation_factor = 1.0;
+        double signal_bias_db = -4.0;
         bool low_latency_iq = false;
     } sdr;
 

@@ -153,6 +153,88 @@ double computeNormalizedIqPowerSum(const uint8_t* iq, size_t samples) {
 #endif
     return computeNormalizedIqPowerSumScalar(iq, count, kNormSqLut.data());
 }
+
+struct SignalLevelResult {
+    float level120 = 0.0f;
+    double dbfs = -120.0;
+    double compensatedDbfs = -120.0;
+    double hardClipRatio = 0.0;
+    double nearClipRatio = 0.0;
+};
+
+struct SignalLevelSmoother {
+    bool initialized = false;
+    float value = 0.0f;
+};
+
+SignalLevelResult computeSignalLevel(const uint8_t* iq,
+                                     size_t samples,
+                                     int appliedGainDb,
+                                     double gainCompFactor,
+                                     double signalBiasDb,
+                                     double floorDbfs,
+                                     double ceilDbfs) {
+    SignalLevelResult out{};
+    if (!iq || samples == 0) {
+        return out;
+    }
+
+    double sumI = 0.0;
+    double sumQ = 0.0;
+    double sumII = 0.0;
+    double sumQQ = 0.0;
+    size_t hardClipCount = 0;
+    size_t nearClipCount = 0;
+
+    for (size_t s = 0; s < samples; s++) {
+        const uint8_t iByte = iq[2 * s];
+        const uint8_t qByte = iq[2 * s + 1];
+        const double iNorm = (static_cast<double>(iByte) - 127.5) * (1.0 / 127.5);
+        const double qNorm = (static_cast<double>(qByte) - 127.5) * (1.0 / 127.5);
+
+        sumI += iNorm;
+        sumQ += qNorm;
+        sumII += iNorm * iNorm;
+        sumQQ += qNorm * qNorm;
+
+        if (iByte <= 1 || iByte >= 254 || qByte <= 1 || qByte >= 254) {
+            hardClipCount += 2;
+        }
+        if (iByte <= 8 || iByte >= 247 || qByte <= 8 || qByte >= 247) {
+            nearClipCount += 2;
+        }
+    }
+
+    const double n = static_cast<double>(samples);
+    const double meanI = sumI / n;
+    const double meanQ = sumQ / n;
+    const double varI = std::max(0.0, (sumII / n) - (meanI * meanI));
+    const double varQ = std::max(0.0, (sumQQ / n) - (meanQ * meanQ));
+    const double rms = std::sqrt(std::max(1e-15, 0.5 * (varI + varQ)));
+
+    out.dbfs = 20.0 * std::log10(rms + 1e-12);
+    out.compensatedDbfs = out.dbfs - (static_cast<double>(appliedGainDb) * gainCompFactor) + signalBiasDb;
+
+    const double safeCeil = std::max(ceilDbfs, floorDbfs + 1.0);
+    const double norm = (out.compensatedDbfs - floorDbfs) / (safeCeil - floorDbfs);
+    out.level120 = std::clamp(static_cast<float>(norm * 120.0), 0.0f, 120.0f);
+
+    const double iqValues = static_cast<double>(samples * 2);
+    out.hardClipRatio = (iqValues > 0.0) ? (static_cast<double>(hardClipCount) / iqValues) : 0.0;
+    out.nearClipRatio = (iqValues > 0.0) ? (static_cast<double>(nearClipCount) / iqValues) : 0.0;
+    return out;
+}
+
+float smoothSignalLevel(float input, SignalLevelSmoother& state) {
+    if (!state.initialized) {
+        state.value = input;
+        state.initialized = true;
+        return state.value;
+    }
+    const float alpha = (input > state.value) ? 0.42f : 0.18f;
+    state.value += (input - state.value) * alpha;
+    return state.value;
+}
 }  // namespace
 
 void signalHandler(int) {
@@ -226,7 +308,8 @@ int main(int argc, char* argv[]) {
         std::cout << "[Config] processing.w0_bandwidth_hz=" << config.processing.w0_bandwidth_hz << "\n";
         std::cout << "[Config] processing.dsp_agc='" << config.processing.dsp_agc << "'\n";
         std::cout << "[Config] processing.stereo_blend='" << config.processing.stereo_blend << "'\n";
-        std::cout << "[Config] sdr.dbf_compensation_factor=" << config.sdr.dbf_compensation_factor << "\n";
+        std::cout << "[Config] sdr.signal_bias_db=" << config.sdr.signal_bias_db << "\n";
+        std::cout << "[Config] sdr.freq_correction_ppm=" << config.sdr.freq_correction_ppm << "\n";
         std::cout << "[Config] sdr.low_latency_iq=" << (config.sdr.low_latency_iq ? "true" : "false") << "\n";
         std::cout << "[Config] rtl_tcp.sample_rate=" << config.rtl_tcp.sample_rate << "\n";
     }
@@ -237,6 +320,7 @@ int main(int argc, char* argv[]) {
     uint32_t rtlDeviceIndex = config.tuner.rtl_device;
     uint32_t freqKHz = config.tuner.default_freq;
     int gain = config.sdr.rtl_gain_db;
+    const int freqCorrectionPpm = std::clamp(config.sdr.freq_correction_ppm, -250, 250);
     const bool useSdrppGainStrategy = (config.sdr.gain_strategy == "sdrpp");
     const int defaultCustomGainFlags = config.sdr.default_custom_gain_flags;
     bool allowClientGainOverride = config.processing.client_gain_allowed;
@@ -535,6 +619,9 @@ int main(int argc, char* argv[]) {
     auto tunerSetSampleRate = [&](uint32_t sampleRate) -> bool {
         return useDirectRtlSdr ? rtlSdrDevice.setSampleRate(sampleRate) : rtlTcpClient.setSampleRate(sampleRate);
     };
+    auto tunerSetFrequencyCorrection = [&](int ppm) -> bool {
+        return useDirectRtlSdr ? rtlSdrDevice.setFrequencyCorrection(ppm) : rtlTcpClient.setFrequencyCorrection(ppm);
+    };
     auto tunerSetGainMode = [&](bool manual) -> bool {
         return useDirectRtlSdr ? rtlSdrDevice.setGainMode(manual) : rtlTcpClient.setGainMode(manual);
     };
@@ -589,7 +676,6 @@ int main(int argc, char* argv[]) {
         return calculateAppliedGainDb();
     };
     constexpr double kSignalGainCompFactor = 0.5;
-    const double dbfCompFactor = std::clamp(config.sdr.dbf_compensation_factor, 0.1, 4.0);
 
     auto applyRtlGainAndAgc = [&](const char* reason) {
         if (!rtlConnected) {
@@ -672,12 +758,21 @@ int main(int argc, char* argv[]) {
                 std::cout << "[SDR] connected; setting frequency to " << freqKHz << " kHz...\n";
                 const bool okFreq = tunerSetFrequency(requestedFrequencyHz.load());
                 const bool okRate = tunerSetSampleRate(iqSampleRate);
+                bool okPpm = true;
+                if (freqCorrectionPpm != 0) {
+                    okPpm = tunerSetFrequencyCorrection(freqCorrectionPpm);
+                }
                 if (!okFreq || !okRate) {
                     std::cerr << "[SDR] warning: failed to initialize " << tunerName()
                               << " stream (setFrequency=" << (okFreq ? 1 : 0)
-                              << ", setSampleRate=" << (okRate ? 1 : 0) << ")\n";
+                              << ", setSampleRate=" << (okRate ? 1 : 0)
+                              << ", setPpm=" << (okPpm ? 1 : 0) << ")\n";
                     tunerDisconnect();
                     return;
+                }
+                if (!okPpm) {
+                    std::cerr << "[SDR] warning: failed to apply frequency correction ppm="
+                              << freqCorrectionPpm << " (continuing without ppm correction)\n";
                 }
                 if (verboseLogging) {
                     std::cout << "[SDR] applying TEF AGC mode " << requestedAGCMode.load()
@@ -754,8 +849,7 @@ int main(int argc, char* argv[]) {
     bool appliedForceMono = requestedForceMono.load();
     bool appliedEffectiveForceMono = appliedForceMono;
     constexpr size_t kRetuneMuteSamples = static_cast<size_t>(OUTPUT_RATE / 25); // ~40 ms at 32 kHz
-    float rfLevelFiltered = 0.0f;
-    bool rfLevelInitialized = false;
+    SignalLevelSmoother rfLevelSmoother;
     if (appliedDeemphasis == 0) {
         afPost.setDeemphasis(50);
         demod.setDeemphasis(50);
@@ -1142,22 +1236,22 @@ int main(int argc, char* argv[]) {
                     }
                     if (samples > 0) {
                         writeIqCapture(iqBuffer, samples);
-                        const double powerSum = computeNormalizedIqPowerSum(iqBuffer, samples);
-                        powerAccum += powerSum / static_cast<double>(samples * 2);
+                        const SignalLevelResult signal = computeSignalLevel(
+                            iqBuffer,
+                            samples,
+                            effectiveAppliedGainDb(),
+                            kSignalGainCompFactor,
+                            config.sdr.signal_bias_db,
+                            config.sdr.signal_floor_dbfs,
+                            config.sdr.signal_ceil_dbfs);
+                        powerAccum += static_cast<double>(signal.level120);
                         validReads++;
                     }
                 }
                 if (validReads == 0) {
                     continue;
                 }
-                const double avgPower = powerAccum / static_cast<double>(validReads);
-                const double dbfs = 10.0 * std::log10(avgPower + 1e-12);
-                const double gainCompDb = static_cast<double>(effectiveAppliedGainDb()) * kSignalGainCompFactor;
-                const double compensatedDbfs = dbfs - gainCompDb;
-                const double kRfFloorDbfs = config.sdr.signal_floor_dbfs;
-                const double kRfCeilDbfs = std::max(config.sdr.signal_ceil_dbfs, kRfFloorDbfs + 1.0);
-                const double norm = (compensatedDbfs - kRfFloorDbfs) / (kRfCeilDbfs - kRfFloorDbfs);
-                const float rfLevel = std::clamp(static_cast<float>(norm * 120.0 * dbfCompFactor), 0.0f, 120.0f);
+                const float rfLevel = static_cast<float>(powerAccum / static_cast<double>(validReads));
 
                 if (!firstPoint) {
                     scanLine << ",";
@@ -1220,39 +1314,62 @@ int main(int argc, char* argv[]) {
         }
         consecutiveReadFailures = 0;
 
-        // RF-domain strength estimate from raw IQ power before demodulation.
-        const double powerSum = computeNormalizedIqPowerSum(iqBuffer, samples);
-        const size_t iqCount = samples * 2;
-        const double avgPower = (iqCount > 0) ? (powerSum / static_cast<double>(iqCount)) : 0.0;
-        const double dbfs = 10.0 * std::log10(avgPower + 1e-12);
-        size_t hardClippedCount = 0;
-        size_t nearClippedCount = 0;
-        for (size_t i = 0; i < iqCount; i++) {
-            const uint8_t v = iqBuffer[i];
-            if (v <= 1 || v >= 254) {
-                hardClippedCount++;
-            }
-            // Near-rail detector is more useful with RTL 8-bit samples than hard 0/255 hits only.
-            if (v <= 8 || v >= 247) {
-                nearClippedCount++;
+        // RF-domain level estimate from raw IQ before demodulation.
+        const SignalLevelResult signal = computeSignalLevel(
+            iqBuffer,
+            samples,
+            effectiveAppliedGainDb(),
+            kSignalGainCompFactor,
+            config.sdr.signal_bias_db,
+            config.sdr.signal_floor_dbfs,
+            config.sdr.signal_ceil_dbfs);
+        const double clipRatio = std::max(signal.hardClipRatio, signal.nearClipRatio);
+        const float rfLevelFiltered = smoothSignalLevel(signal.level120, rfLevelSmoother);
+        if (verboseLogging) {
+            static uint32_t signalLogCount = 0;
+            const uint32_t count = ++signalLogCount;
+            if (count <= 5 || (count % 100) == 0) {
+                std::cout << "[SIG] dbfs=" << std::fixed << std::setprecision(2) << signal.dbfs
+                          << " compensated=" << signal.compensatedDbfs
+                          << " level=" << std::setprecision(1) << signal.level120
+                          << " filtered=" << rfLevelFiltered
+                          << " clip=" << std::setprecision(4) << clipRatio
+                          << "\n";
             }
         }
-        const double hardClipRatio = (iqCount > 0) ? (static_cast<double>(hardClippedCount) / static_cast<double>(iqCount)) : 0.0;
-        const double nearClipRatio = (iqCount > 0) ? (static_cast<double>(nearClippedCount) / static_cast<double>(iqCount)) : 0.0;
-        const double clipRatio = std::max(hardClipRatio, nearClipRatio);
-        // Gain-normalize ADC-domain dBFS for a more stable RF-strength estimate.
-        const double gainCompDb = static_cast<double>(effectiveAppliedGainDb()) * kSignalGainCompFactor;
-        const double compensatedDbfs = dbfs - gainCompDb;
-        const double kRfFloorDbfs = config.sdr.signal_floor_dbfs;
-        const double kRfCeilDbfs = std::max(config.sdr.signal_ceil_dbfs, kRfFloorDbfs + 1.0);
-        const double norm = (compensatedDbfs - kRfFloorDbfs) / (kRfCeilDbfs - kRfFloorDbfs);
-        const float rfLevel = std::clamp(static_cast<float>(norm * 120.0 * dbfCompFactor), 0.0f, 120.0f);
-        if (!rfLevelInitialized) {
-            rfLevelFiltered = rfLevel;
-            rfLevelInitialized = true;
-        } else {
-            rfLevelFiltered = rfLevelFiltered * 0.70f + rfLevel * 0.30f;
+
+        if (!useSdrppGainStrategy && gain < 0 && !isImsAgcEnabled()) {
+            const auto now = std::chrono::steady_clock::now();
+            const bool overload = (clipRatio > 0.0200) || (signal.dbfs > -5.0);
+            const bool weak = (clipRatio < 0.0005) && (signal.compensatedDbfs < -47.0) && (rfLevelFiltered < 35.0f);
+
+            if (overload && (now - lastGainDown) >= std::chrono::milliseconds(900)) {
+                const int current = std::clamp(requestedAGCMode.load(), 0, 3);
+                if (current < 3) {
+                    requestedAGCMode = current + 1;
+                    pendingAGC = true;
+                    lastGainDown = now;
+                    if (verboseLogging) {
+                        std::cout << "[GAIN] clip-protect: A" << current << " -> A" << (current + 1)
+                                  << " (dbfs=" << std::fixed << std::setprecision(2) << signal.dbfs
+                                  << ", clip=" << std::setprecision(4) << clipRatio << ")\n";
+                    }
+                }
+            } else if (weak && (now - lastGainUp) >= std::chrono::milliseconds(4000)) {
+                const int current = std::clamp(requestedAGCMode.load(), 0, 3);
+                if (current > 0) {
+                    requestedAGCMode = current - 1;
+                    pendingAGC = true;
+                    lastGainUp = now;
+                    if (verboseLogging) {
+                        std::cout << "[GAIN] sensitivity-up: A" << current << " -> A" << (current - 1)
+                                  << " (comp=" << std::fixed << std::setprecision(2) << signal.compensatedDbfs
+                                  << ", clip=" << std::setprecision(4) << clipRatio << ")\n";
+                    }
+                }
+            }
         }
+
         const bool effectiveForceMono = targetForceMono;
         if (effectiveForceMono != appliedEffectiveForceMono) {
             stereo.setForceMono(effectiveForceMono);

@@ -121,6 +121,37 @@ research/              - Reference implementations
 - Use existing libraries (SDR++ algorithms, not custom implementations)
 - Follow patterns in existing source files
 
+## Code Quality
+
+### clang-tidy (Static Analysis)
+
+Run manually:
+
+```bash
+clang-tidy src/*.cpp -- -Iinclude -I/usr/local/include
+```
+
+Or integrate with CMake (run from build directory):
+
+```bash
+cmake .. -DCMAKE_CXX_CLANG_TIDY=clang-tidy
+make
+```
+
+### clang-format (Code Formatting)
+
+Format a single file:
+
+```bash
+clang-format -i src/main.cpp
+```
+
+Format all source files:
+
+```bash
+clang-format -i src/*.cpp include/**/*.h
+```
+
 ## License
 
 GPLv3 - see LICENSE file. Derived from SDRPlusPlus, XDR-GTK, FM-DX-Tuner, and xdrd.

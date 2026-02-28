@@ -170,6 +170,11 @@ bool Config::loadFromFile(const std::string& filename) {
                 if (parseInt(value, parsed)) {
                     sdr.rtl_gain_db = parsed;
                 }
+            } else if (key == "freq_correction_ppm") {
+                int parsed = 0;
+                if (parseInt(value, parsed)) {
+                    sdr.freq_correction_ppm = std::clamp(parsed, -250, 250);
+                }
             } else if (key == "default_custom_gain_flags") {
                 int parsed = 0;
                 if (parseInt(value, parsed)) {
@@ -202,10 +207,10 @@ bool Config::loadFromFile(const std::string& filename) {
                 if (parseDouble(value, parsed)) {
                     sdr.signal_ceil_dbfs = parsed;
                 }
-            } else if (key == "dbf_compensation_factor") {
+            } else if (key == "signal_bias_db") {
                 double parsed = 0.0;
                 if (parseDouble(value, parsed)) {
-                    sdr.dbf_compensation_factor = std::clamp(parsed, 0.1, 4.0);
+                    sdr.signal_bias_db = std::clamp(parsed, -30.0, 30.0);
                 }
             } else if (key == "low_latency_iq") {
                 bool parsed = false;

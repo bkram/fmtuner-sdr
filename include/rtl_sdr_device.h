@@ -19,6 +19,7 @@ public:
 
     bool setFrequency(uint32_t freqHz);
     bool setSampleRate(uint32_t rate);
+    bool setFrequencyCorrection(int ppm);
     bool setGainMode(bool manual);
     bool setGain(uint32_t gainTenthsDb);
     bool setAGC(bool enable);

@@ -270,6 +270,10 @@ bool RTLTCPClient::setSampleRate(uint32_t rate) {
     return false;
 }
 
+bool RTLTCPClient::setFrequencyCorrection(int ppm) {
+    return sendCommand(0x05, static_cast<uint32_t>(static_cast<int32_t>(ppm)));
+}
+
 bool RTLTCPClient::setGainMode(bool manual) {
     return sendCommand(0x03, manual ? 1u : 0u);
 }

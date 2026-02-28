@@ -148,6 +148,18 @@ bool RTLSDRDevice::setSampleRate(uint32_t rate) {
 #endif
 }
 
+bool RTLSDRDevice::setFrequencyCorrection(int ppm) {
+#if defined(FM_TUNER_HAS_RTLSDR)
+    if (!m_connected || !m_deviceHandle) {
+        return false;
+    }
+    return rtlsdr_set_freq_correction(reinterpret_cast<rtlsdr_dev_t*>(m_deviceHandle), ppm) == 0;
+#else
+    (void)ppm;
+    return false;
+#endif
+}
+
 bool RTLSDRDevice::setGainMode(bool manual) {
 #if defined(FM_TUNER_HAS_RTLSDR)
     if (!m_connected || !m_deviceHandle) {
