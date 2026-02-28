@@ -896,7 +896,8 @@ void AudioOutput::runOutputThread() {
 
 #if defined(_WIN32) && defined(FM_TUNER_HAS_WINMM)
 void AudioOutput::runWinMMOutputThread() {
-  constexpr size_t kFrames = static_cast<size_t>(FRAMES_PER_BUFFER);
+  // Lower WinMM device buffering to reduce end-to-end output latency.
+  constexpr size_t kFrames = 512;
   constexpr size_t kSamplesPerBuffer = kFrames * CHANNELS;
   constexpr size_t kNumBuffers = 4;
 
@@ -1548,8 +1549,9 @@ bool AudioOutput::write(const float *left, const float *right,
 #if defined(__APPLE__) && defined(FM_TUNER_HAS_COREAUDIO)
   if (m_enableSpeaker && m_audioUnit) {
     std::lock_guard<std::mutex> lock(m_outputMutex);
+    // Match Linux app-queue target: cap to ~0.5 s.
     constexpr size_t kMaxQueuedSamples =
-        static_cast<size_t>(SAMPLE_RATE) * CHANNELS;
+        (static_cast<size_t>(SAMPLE_RATE) * CHANNELS) / 2;
     const size_t queuedSamples =
         (m_outputQueue.size() > m_outputReadIndex)
             ? (m_outputQueue.size() - m_outputReadIndex)
@@ -1577,8 +1579,9 @@ bool AudioOutput::write(const float *left, const float *right,
 #if defined(_WIN32) && defined(FM_TUNER_HAS_WINMM)
   if (m_enableSpeaker && m_waveOut) {
     std::lock_guard<std::mutex> lock(m_outputMutex);
+    // Match Linux app-queue target: cap to ~0.5 s.
     constexpr size_t kMaxQueuedSamples =
-        static_cast<size_t>(SAMPLE_RATE) * CHANNELS;
+        (static_cast<size_t>(SAMPLE_RATE) * CHANNELS) / 2;
     const size_t queuedSamples =
         (m_outputQueue.size() > m_outputReadIndex)
             ? (m_outputQueue.size() - m_outputReadIndex)
