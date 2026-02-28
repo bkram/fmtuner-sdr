@@ -156,6 +156,37 @@ private:
     std::uint32_t m_polyphaseFilters = 32;
 };
 
+class ComplexDecimator {
+public:
+    ComplexDecimator() = default;
+    ~ComplexDecimator();
+    ComplexDecimator(const ComplexDecimator&) = delete;
+    ComplexDecimator& operator=(const ComplexDecimator&) = delete;
+    ComplexDecimator(ComplexDecimator&&) = delete;
+    ComplexDecimator& operator=(ComplexDecimator&&) = delete;
+
+    void init(std::uint32_t factor, std::uint32_t tapsPerPhase = 12, float stopBandAtten = 70.0f);
+    void reset();
+    std::size_t execute(const uint8_t* iqIn,
+                        std::size_t inSamples,
+                        uint8_t* iqOut,
+                        std::size_t outCapacity) const;
+    std::size_t executeComplex(const uint8_t* iqIn,
+                               std::size_t inSamples,
+                               std::complex<float>* iqOut,
+                               std::size_t outCapacity) const;
+    bool ready() const { return m_object != nullptr || m_factor == 1; }
+    std::uint32_t factor() const { return m_factor; }
+
+private:
+    firdecim_crcf m_object = nullptr;
+    std::uint32_t m_factor = 1;
+    std::uint32_t m_tapsPerPhase = 12;
+    float m_stopBandAtten = 70.0f;
+    std::vector<float> m_taps{};
+    mutable std::vector<std::complex<float>> m_block{};
+};
+
 }  // namespace fm_tuner::dsp::liquid
 
 #endif

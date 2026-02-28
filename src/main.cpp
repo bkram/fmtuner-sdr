@@ -33,6 +33,7 @@
 #include "config.h"
 #include "rtl_sdr_device.h"
 #include "dsp/runtime.h"
+#include "dsp/liquid_primitives.h"
 
 static std::atomic<bool> g_running(true);
 
@@ -163,7 +164,7 @@ void printUsage(const char* prog) {
               << "Options:\n"
               << "  -c, --config <file>    INI config file\n"
               << "  -t, --tcp <host:port>  rtl_tcp server address (default: localhost:1234)\n"
-              << "      --iq-rate <rate>   IQ sample rate: 1024000 or 2048000 (default: 1024000)\n"
+              << "      --iq-rate <rate>   IQ sample rate: 256000, 1024000, or 2048000 (default: 256000)\n"
               << "      --source <name>    Tuner source: rtl_tcp or rtl_sdr (default: rtl_sdr)\n"
               << "      --rtl-device <id>  RTL-SDR device index for --source rtl_sdr (default: 0)\n"
               << "  -f, --freq <khz>      Frequency in kHz (default: 88600)\n"
@@ -392,10 +393,10 @@ int main(int argc, char* argv[]) {
             const std::string value = readValue(i, arg, "iq-rate");
             try {
                 const int parsed = std::stoi(value);
-                if (parsed == 1024000 || parsed == 2048000) {
+                if (parsed == 256000 || parsed == 1024000 || parsed == 2048000) {
                     iqSampleRate = static_cast<uint32_t>(parsed);
                 } else {
-                    std::cerr << "[CLI] invalid --iq-rate value: " << value << " (expected 1024000 or 2048000)\n";
+                    std::cerr << "[CLI] invalid --iq-rate value: " << value << " (expected 256000, 1024000, or 2048000)\n";
                     return 1;
                 }
             } catch (...) {
@@ -477,6 +478,17 @@ int main(int argc, char* argv[]) {
     if (wavFile.empty() && iqFile.empty() && !enableSpeaker) {
         std::cerr << "[CLI] error: must specify at least one output: -w (wav), -i (iq), or -s (audio)\n";
         printUsage(argv[0]);
+        return 1;
+    }
+
+    if (!(iqSampleRate == 256000 || iqSampleRate == 1024000 || iqSampleRate == 2048000)) {
+        std::cerr << "[SDR] unsupported iq sample rate: " << iqSampleRate
+                  << " (expected 256000, 1024000, or 2048000)\n";
+        return 1;
+    }
+    const size_t iqDecimation = static_cast<size_t>(iqSampleRate / INPUT_RATE);
+    if (iqDecimation == 0 || (iqSampleRate % INPUT_RATE) != 0) {
+        std::cerr << "[SDR] iq sample rate must be an integer multiple of " << INPUT_RATE << "\n";
         return 1;
     }
 
@@ -658,7 +670,7 @@ int main(int argc, char* argv[]) {
             if (tunerConnect()) {
                 std::cout << "[SDR] connected; setting frequency to " << freqKHz << " kHz...\n";
                 const bool okFreq = tunerSetFrequency(requestedFrequencyHz.load());
-                const bool okRate = tunerSetSampleRate(INPUT_RATE);
+                const bool okRate = tunerSetSampleRate(iqSampleRate);
                 if (!okFreq || !okRate) {
                     std::cerr << "[SDR] warning: failed to initialize " << tunerName()
                               << " stream (setFrequency=" << (okFreq ? 1 : 0)
@@ -716,13 +728,14 @@ int main(int argc, char* argv[]) {
         }
     }
     AFPostProcessor afPost(INPUT_RATE, OUTPUT_RATE);
+    fm_tuner::dsp::liquid::ComplexDecimator iqDecimator;
+    const uint32_t decimFactor = static_cast<uint32_t>(iqDecimation);
+    const uint32_t decimTapsPerPhase = (decimFactor >= 8U) ? 28U : ((decimFactor >= 4U) ? 20U : 12U);
+    iqDecimator.init(decimFactor, decimTapsPerPhase, 80.0f);
     if (verboseLogging) {
         std::cout << "[SDR] iq_sample_rate=" << iqSampleRate
+                  << " decimation=" << iqDecimation
                   << " dsp_input_rate=" << INPUT_RATE << "\n";
-        if (iqSampleRate != INPUT_RATE) {
-            std::cout << "[SDR] requested iq_sample_rate is currently ignored in DSP path; using "
-                      << INPUT_RATE << " for stable stereo decode\n";
-        }
     }
     const std::size_t dspBlockSize = static_cast<std::size_t>(std::clamp(config.processing.dsp_block_samples, 1024, 32768));
     fm_tuner::dsp::Runtime dspRuntime(dspBlockSize, verboseLogging);
@@ -733,6 +746,7 @@ int main(int argc, char* argv[]) {
         demod.reset();
         stereo.reset();
         afPost.reset();
+        iqDecimator.reset();
     });
     int appliedBandwidthHz = requestedBandwidthHz.load();
     int appliedDeemphasis = requestedDeemphasis.load();
@@ -975,20 +989,26 @@ int main(int argc, char* argv[]) {
     }
 
     // Direct RTL-SDR async callback is configured to 16384 bytes (8192 IQ samples).
-    // Using 8192-sample DSP blocks at 256 ksps keeps downstream timing stable.
+    // Read at tuner rate, then decimate to stable DSP-rate blocks.
     const size_t BUF_SAMPLES = dspRuntime.blockSize();
-    const size_t SDR_BUF_SAMPLES = BUF_SAMPLES;
+    const size_t SDR_BUF_SAMPLES = BUF_SAMPLES * iqDecimation;
     const auto noDataSleep = useDirectRtlSdr ? std::chrono::milliseconds(2)
                                              : std::chrono::milliseconds(10);
     const auto scanRetrySleep = useDirectRtlSdr ? std::chrono::milliseconds(2)
                                                 : std::chrono::milliseconds(5);
     std::vector<uint8_t> iqBufferStorage(SDR_BUF_SAMPLES * 2, 0);
-    std::vector<float> demodBufferStorage(SDR_BUF_SAMPLES, 0.0f);
+    std::vector<std::complex<float>> iqDecimatedComplexStorage(BUF_SAMPLES);
+    std::vector<uint8_t> iqStagingStorage;
+    if (iqDecimation > 1) {
+        iqStagingStorage.reserve(SDR_BUF_SAMPLES * 4);
+    }
+    std::vector<float> demodBufferStorage(BUF_SAMPLES, 0.0f);
     std::vector<float> stereoLeftStorage(BUF_SAMPLES, 0.0f);
     std::vector<float> stereoRightStorage(BUF_SAMPLES, 0.0f);
     std::vector<float> audioLeftStorage(BUF_SAMPLES, 0.0f);
     std::vector<float> audioRightStorage(BUF_SAMPLES, 0.0f);
     uint8_t* iqBuffer = iqBufferStorage.data();
+    std::complex<float>* iqDecimatedComplex = iqDecimatedComplexStorage.data();
     float* demodBuffer = demodBufferStorage.data();
     float* stereoLeft = stereoLeftStorage.data();
     float* stereoRight = stereoRightStorage.data();
@@ -1114,7 +1134,7 @@ int main(int argc, char* argv[]) {
                 for (int avg = 0; avg < 3; avg++) {
                     size_t samples = 0;
                     for (int retries = 0; retries < 2 && samples == 0; retries++) {
-                        samples = tunerReadIQ(iqBuffer, BUF_SAMPLES);
+                        samples = tunerReadIQ(iqBuffer, SDR_BUF_SAMPLES);
                         if (samples == 0) {
                             std::this_thread::sleep_for(scanRetrySleep);
                         }
@@ -1176,7 +1196,7 @@ int main(int argc, char* argv[]) {
             appliedForceMono = targetForceMono;
         }
 
-        size_t samples = tunerReadIQ(iqBuffer, BUF_SAMPLES);
+        size_t samples = tunerReadIQ(iqBuffer, SDR_BUF_SAMPLES);
         if (samples == 0) {
             consecutiveReadFailures++;
             if (autoReconnect && rtlConnected && consecutiveReadFailures >= 20) {
@@ -1189,12 +1209,12 @@ int main(int argc, char* argv[]) {
             continue;
         }
         writeIqCapture(iqBuffer, samples);
-        if (verboseLogging && samples < BUF_SAMPLES) {
+        if (verboseLogging && samples < SDR_BUF_SAMPLES) {
             static uint32_t shortIqReadCount = 0;
             const uint32_t count = ++shortIqReadCount;
             if (count <= 5 || (count % 50) == 0) {
                 std::cerr << "[SDR] short IQ read (" << count << "): "
-                          << samples << "/" << BUF_SAMPLES << " samples\n";
+                          << samples << "/" << SDR_BUF_SAMPLES << " samples\n";
             }
         }
         consecutiveReadFailures = 0;
@@ -1242,9 +1262,39 @@ int main(int argc, char* argv[]) {
         bool stereoDetected = false;
         int pilotTenthsKHz = 0;
 
+        const uint8_t* iqForDemod = iqBuffer;
+        const std::complex<float>* iqForDemodComplex = nullptr;
+        size_t demodSamples = samples;
+        if (iqDecimation > 1) {
+            const size_t appendedBytes = samples * 2;
+            const size_t oldSize = iqStagingStorage.size();
+            iqStagingStorage.resize(oldSize + appendedBytes);
+            std::memcpy(iqStagingStorage.data() + oldSize, iqBuffer, appendedBytes);
+
+            const size_t availableSamples = iqStagingStorage.size() / 2;
+            if (availableSamples < SDR_BUF_SAMPLES) {
+                continue;
+            }
+
+            demodSamples = iqDecimator.executeComplex(iqStagingStorage.data(), SDR_BUF_SAMPLES, iqDecimatedComplex, BUF_SAMPLES);
+            iqForDemodComplex = iqDecimatedComplex;
+            const size_t consumedBytes = SDR_BUF_SAMPLES * 2;
+            const size_t remainingBytes = iqStagingStorage.size() - consumedBytes;
+            if (remainingBytes > 0) {
+                std::memmove(iqStagingStorage.data(), iqStagingStorage.data() + consumedBytes, remainingBytes);
+            }
+            iqStagingStorage.resize(remainingBytes);
+            if (demodSamples == 0) {
+                std::this_thread::sleep_for(noDataSleep);
+                continue;
+            }
+        }
+
         if (!config.processing.stereo) {
-            outSamples = demod.processSplit(iqBuffer, demodBuffer, audioLeft, samples);
-            queueRdsBlock(demodBuffer, samples);
+            outSamples = (iqForDemodComplex != nullptr)
+                ? demod.processSplitComplex(iqForDemodComplex, demodBuffer, audioLeft, demodSamples)
+                : demod.processSplit(iqForDemod, demodBuffer, audioLeft, demodSamples);
+            queueRdsBlock(demodBuffer, demodSamples);
             for (size_t i = 0; i < outSamples; i++) {
                 const float mono = audioLeft[i] * 0.5f;
                 audioLeft[i] = mono;
@@ -1253,9 +1303,13 @@ int main(int argc, char* argv[]) {
         } else {
             // Feed RDS with full-rate discriminator MPX (includes 57 kHz RDS subcarrier).
             // redsea expects composite MPX, not post-audio-filtered baseband.
-            demod.processSplit(iqBuffer, demodBuffer, nullptr, samples);
-            queueRdsBlock(demodBuffer, samples);
-            const size_t stereoSamples = stereo.processAudio(demodBuffer, stereoLeft, stereoRight, samples);
+            if (iqForDemodComplex != nullptr) {
+                demod.processSplitComplex(iqForDemodComplex, demodBuffer, nullptr, demodSamples);
+            } else {
+                demod.processSplit(iqForDemod, demodBuffer, nullptr, demodSamples);
+            }
+            queueRdsBlock(demodBuffer, demodSamples);
+            const size_t stereoSamples = stereo.processAudio(demodBuffer, stereoLeft, stereoRight, demodSamples);
             outSamples = afPost.process(stereoLeft, stereoRight, stereoSamples, audioLeft, audioRight, BUF_SAMPLES);
             stereoDetected = stereo.isStereo();
             pilotTenthsKHz = stereo.getPilotLevelTenthsKHz();

@@ -1,5 +1,6 @@
 #include "dsp/liquid_primitives.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -344,6 +345,139 @@ std::uint32_t Resampler::execute(float input, std::array<float, kMaxOutput>& out
         return static_cast<std::uint32_t>(kMaxOutput);
     }
     return static_cast<std::uint32_t>(written);
+}
+
+ComplexDecimator::~ComplexDecimator() {
+    if (m_object != nullptr) {
+        firdecim_crcf_destroy(m_object);
+    }
+}
+
+void ComplexDecimator::init(std::uint32_t factor, std::uint32_t tapsPerPhase, float stopBandAtten) {
+    if (factor == 0) {
+        throw std::runtime_error("complex decimator factor must be >= 1");
+    }
+    if (m_object != nullptr) {
+        firdecim_crcf_destroy(m_object);
+        m_object = nullptr;
+    }
+    m_factor = factor;
+    m_tapsPerPhase = std::max<std::uint32_t>(4, tapsPerPhase);
+    m_stopBandAtten = stopBandAtten;
+    m_block.assign(static_cast<std::size_t>(m_factor), std::complex<float>(0.0f, 0.0f));
+    m_taps.clear();
+
+    if (m_factor == 1) {
+        return;
+    }
+
+    const std::uint32_t hLen = m_factor * m_tapsPerPhase;
+    m_taps.assign(hLen, 0.0f);
+    const float cutoff = std::clamp(0.45f / static_cast<float>(m_factor), 0.01f, 0.45f);
+    if (liquid_firdes_kaiser(hLen, cutoff, m_stopBandAtten, 0.0f, m_taps.data()) != LIQUID_OK) {
+        throw std::runtime_error("failed to design complex decimator taps");
+    }
+    m_object = firdecim_crcf_create(m_factor, m_taps.data(), hLen);
+    if (m_object == nullptr) {
+        throw std::runtime_error("failed to create liquid firdecim_crcf");
+    }
+    firdecim_crcf_set_scale(m_object, 2.0f * cutoff);
+}
+
+void ComplexDecimator::reset() {
+    if (m_factor == 1) {
+        return;
+    }
+    if (m_object != nullptr) {
+        firdecim_crcf_destroy(m_object);
+        m_object = nullptr;
+    }
+    const std::uint32_t hLen = m_factor * m_tapsPerPhase;
+    const float cutoff = std::clamp(0.45f / static_cast<float>(m_factor), 0.01f, 0.45f);
+    m_object = firdecim_crcf_create(m_factor, m_taps.data(), hLen);
+    if (m_object == nullptr) {
+        throw std::runtime_error("failed to recreate liquid firdecim_crcf");
+    }
+    firdecim_crcf_set_scale(m_object, 2.0f * cutoff);
+}
+
+std::size_t ComplexDecimator::execute(const uint8_t* iqIn,
+                                      std::size_t inSamples,
+                                      uint8_t* iqOut,
+                                      std::size_t outCapacity) const {
+    if (!iqIn || !iqOut || inSamples == 0 || outCapacity == 0) {
+        return 0;
+    }
+
+    if (m_factor == 1) {
+        const std::size_t copySamples = std::min(inSamples, outCapacity);
+        std::copy_n(iqIn, copySamples * 2, iqOut);
+        return copySamples;
+    }
+    if (m_object == nullptr || m_block.size() != m_factor) {
+        return 0;
+    }
+
+    static constexpr float kScale = 1.0f / 127.5f;
+    const std::size_t blocks = std::min(inSamples / m_factor, outCapacity);
+    for (std::size_t b = 0; b < blocks; b++) {
+        const std::size_t inBase = b * m_factor;
+        for (std::size_t k = 0; k < m_factor; k++) {
+            const std::size_t idx = (inBase + k) * 2;
+            const float i = (static_cast<float>(iqIn[idx]) - 127.5f) * kScale;
+            const float q = (static_cast<float>(iqIn[idx + 1]) - 127.5f) * kScale;
+            m_block[k] = std::complex<float>(i, q);
+        }
+
+        std::complex<float> y(0.0f, 0.0f);
+        firdecim_crcf_execute(m_object, m_block.data(), &y);
+        const float iOut = std::clamp((y.real() * 127.5f) + 127.5f, 0.0f, 255.0f);
+        const float qOut = std::clamp((y.imag() * 127.5f) + 127.5f, 0.0f, 255.0f);
+        const std::size_t outIdx = b * 2;
+        iqOut[outIdx] = static_cast<uint8_t>(iOut);
+        iqOut[outIdx + 1] = static_cast<uint8_t>(qOut);
+    }
+    return blocks;
+}
+
+std::size_t ComplexDecimator::executeComplex(const uint8_t* iqIn,
+                                             std::size_t inSamples,
+                                             std::complex<float>* iqOut,
+                                             std::size_t outCapacity) const {
+    if (!iqIn || !iqOut || inSamples == 0 || outCapacity == 0) {
+        return 0;
+    }
+
+    static constexpr float kScale = 1.0f / 127.5f;
+    if (m_factor == 1) {
+        const std::size_t copySamples = std::min(inSamples, outCapacity);
+        for (std::size_t i = 0; i < copySamples; i++) {
+            const std::size_t idx = i * 2;
+            const float iOut = (static_cast<float>(iqIn[idx]) - 127.5f) * kScale;
+            const float qOut = (static_cast<float>(iqIn[idx + 1]) - 127.5f) * kScale;
+            iqOut[i] = std::complex<float>(iOut, qOut);
+        }
+        return copySamples;
+    }
+    if (m_object == nullptr || m_block.size() != m_factor) {
+        return 0;
+    }
+
+    const std::size_t blocks = std::min(inSamples / m_factor, outCapacity);
+    for (std::size_t b = 0; b < blocks; b++) {
+        const std::size_t inBase = b * m_factor;
+        for (std::size_t k = 0; k < m_factor; k++) {
+            const std::size_t idx = (inBase + k) * 2;
+            const float i = (static_cast<float>(iqIn[idx]) - 127.5f) * kScale;
+            const float q = (static_cast<float>(iqIn[idx + 1]) - 127.5f) * kScale;
+            m_block[k] = std::complex<float>(i, q);
+        }
+
+        std::complex<float> y(0.0f, 0.0f);
+        firdecim_crcf_execute(m_object, m_block.data(), &y);
+        iqOut[b] = y;
+    }
+    return blocks;
 }
 
 }  // namespace fm_tuner::dsp::liquid

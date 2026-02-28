@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <array>
+#include <complex>
 #include <vector>
 #include "dsp/liquid_primitives.h"
 
@@ -19,8 +20,10 @@ public:
     ~FMDemod();
 
     void process(const uint8_t* iq, float* audio, size_t numSamples);
+    void processComplex(const std::complex<float>* iq, float* audio, size_t numSamples);
     void processNoDownsample(const uint8_t* iq, float* audio, size_t numSamples);
     size_t processSplit(const uint8_t* iq, float* mpxOut, float* monoOut, size_t numSamples);
+    size_t processSplitComplex(const std::complex<float>* iq, float* mpxOut, float* monoOut, size_t numSamples);
     size_t downsampleAudio(const float* demod, float* audio, size_t numSamples);
     void reset();
 
@@ -35,6 +38,7 @@ public:
 
 private:
     void demodulate(const uint8_t* iq, float* audio, size_t len);
+    void demodulateComplex(const std::complex<float>* iq, float* audio, size_t len);
 
     int m_inputRate;
     int m_outputRate;

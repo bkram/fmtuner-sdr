@@ -173,6 +173,31 @@ void FMDemod::demodulate(const uint8_t* iq, float* audio, size_t len) {
     m_clippingRatio = (len > 0) ? (static_cast<float>(clipCount) / static_cast<float>(len)) : 0.0f;
 }
 
+void FMDemod::demodulateComplex(const std::complex<float>* iq, float* audio, size_t len) {
+    size_t clipCount = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        const float iRaw = iq[i].real();
+        const float qRaw = iq[i].imag();
+        if (std::abs(iRaw) >= 0.995f || std::abs(qRaw) >= 0.995f) {
+            clipCount++;
+        }
+
+        const float iDc = m_liquidIqDcBlockI.execute(iRaw);
+        const float qDc = m_liquidIqDcBlockQ.execute(qRaw);
+
+        m_liquidIqFilter.push(std::complex<float>(iDc, qDc));
+        std::complex<float> iqDemodIn = m_liquidIqFilter.execute();
+        if (m_dspAgcMode != DspAgcMode::Off) {
+            iqDemodIn = m_liquidIqAgc.execute(iqDemodIn);
+        }
+        audio[i] = m_liquidFreqDemod.execute(iqDemodIn);
+    }
+
+    m_clipping = (clipCount > 0);
+    m_clippingRatio = (len > 0) ? (static_cast<float>(clipCount) / static_cast<float>(len)) : 0.0f;
+}
+
 size_t FMDemod::downsampleAudio(const float* demod, float* audio, size_t numSamples) {
     size_t outCount = 0;
     for (size_t i = 0; i < numSamples; i++) {
@@ -197,11 +222,33 @@ void FMDemod::process(const uint8_t* iq, float* audio, size_t numSamples) {
     downsampleAudio(m_demodScratch.data(), audio, numSamples);
 }
 
+void FMDemod::processComplex(const std::complex<float>* iq, float* audio, size_t numSamples) {
+    if (m_demodScratch.size() < numSamples) {
+        m_demodScratch.resize(numSamples);
+    }
+    demodulateComplex(iq, m_demodScratch.data(), numSamples);
+    downsampleAudio(m_demodScratch.data(), audio, numSamples);
+}
+
 size_t FMDemod::processSplit(const uint8_t* iq, float* mpxOut, float* monoOut, size_t numSamples) {
     if (m_demodScratch.size() < numSamples) {
         m_demodScratch.resize(numSamples);
     }
     demodulate(iq, m_demodScratch.data(), numSamples);
+    if (mpxOut) {
+        std::memcpy(mpxOut, m_demodScratch.data(), numSamples * sizeof(float));
+    }
+    if (!monoOut) {
+        return 0;
+    }
+    return downsampleAudio(m_demodScratch.data(), monoOut, numSamples);
+}
+
+size_t FMDemod::processSplitComplex(const std::complex<float>* iq, float* mpxOut, float* monoOut, size_t numSamples) {
+    if (m_demodScratch.size() < numSamples) {
+        m_demodScratch.resize(numSamples);
+    }
+    demodulateComplex(iq, m_demodScratch.data(), numSamples);
     if (mpxOut) {
         std::memcpy(mpxOut, m_demodScratch.data(), numSamples * sizeof(float));
     }

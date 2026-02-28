@@ -146,7 +146,7 @@ bool Config::loadFromFile(const std::string& filename) {
                 }
             } else if (key == "sample_rate") {
                 int parsed = 0;
-                if (parseInt(value, parsed) && (parsed == 1024000 || parsed == 2048000)) {
+                if (parseInt(value, parsed) && (parsed == 256000 || parsed == 1024000 || parsed == 2048000)) {
                     rtl_tcp.sample_rate = static_cast<uint32_t>(parsed);
                 }
             }
