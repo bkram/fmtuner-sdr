@@ -170,7 +170,7 @@ Current workflows exist for:
 - macOS
 - Windows
 
-Linux CI publishes real `.deb` artifacts for Ubuntu x64 and arm64 runners.
+Linux CI publishes real package artifacts for Ubuntu, Debian, and Fedora on `x64` and `arm64`.
 
 Run local arm64 Linux CI-equivalent builds with Docker:
 
@@ -179,6 +179,11 @@ Run local arm64 Linux CI-equivalent builds with Docker:
 ```
 
 This script runs arm64 container builds for `ubuntu:24.04`, `debian:trixie`, and `fedora:40`, then performs package-install smoke tests in fresh containers.
+
+It validates:
+- `.deb` build + install smoke test on Ubuntu and Debian
+- `.rpm` build + install smoke test on Fedora
+- runtime linkage (`ldd`) and basic CLI startup (`fm-sdr-tuner --help`)
 
 If CI fails on dependencies, align workflow package installs with local requirements listed above.
 

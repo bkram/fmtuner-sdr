@@ -20,8 +20,8 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
 #include <random>
 #include <sstream>
 
@@ -303,27 +303,40 @@ std::string XDRServer::generateSalt() {
 
 std::string XDRServer::computeSHA1(const std::string &salt,
                                    const std::string &password) {
-  unsigned char sha[SHA_DIGEST_LENGTH];
-  SHA_CTX ctx;
-
-  if (!SHA1_Init(&ctx)) {
-    return {};
-  }
-  if (!SHA1_Update(&ctx, salt.c_str(), salt.length())) {
-    return {};
-  }
-  if (!SHA1_Update(&ctx, password.c_str(), password.length())) {
-    return {};
-  }
-  if (!SHA1_Final(sha, &ctx)) {
+  unsigned char sha[EVP_MAX_MD_SIZE];
+  unsigned int shaLen = 0;
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (ctx == nullptr) {
     return {};
   }
 
-  char sha_string[SHA_DIGEST_LENGTH * 2 + 1];
-  for (int i = 0; i < SHA_DIGEST_LENGTH; i++) {
+  if (EVP_DigestInit_ex(ctx, EVP_sha1(), nullptr) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return {};
+  }
+  if (EVP_DigestUpdate(ctx, salt.data(), salt.size()) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return {};
+  }
+  if (EVP_DigestUpdate(ctx, password.data(), password.size()) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return {};
+  }
+  if (EVP_DigestFinal_ex(ctx, sha, &shaLen) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return {};
+  }
+  EVP_MD_CTX_free(ctx);
+
+  if (shaLen == 0) {
+    return {};
+  }
+
+  char sha_string[EVP_MAX_MD_SIZE * 2 + 1];
+  for (unsigned int i = 0; i < shaLen; i++) {
     std::snprintf(sha_string + (i * 2), 3, "%02x", sha[i]);
   }
-  sha_string[SHA_DIGEST_LENGTH * 2] = '\0';
+  sha_string[shaLen * 2] = '\0';
   return std::string(sha_string);
 }
 
