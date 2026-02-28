@@ -18,9 +18,9 @@ struct SignalLevelSmoother {
 };
 
 SignalLevelResult computeSignalLevel(const uint8_t *iq, size_t samples,
-                                    int appliedGainDb, double gainCompFactor,
-                                    double signalBiasDb, double floorDbfs,
-                                    double ceilDbfs);
+                                     int appliedGainDb, double gainCompFactor,
+                                     double signalBiasDb, double floorDbfs,
+                                     double ceilDbfs);
 
 float smoothSignalLevel(float input, SignalLevelSmoother &state);
 
