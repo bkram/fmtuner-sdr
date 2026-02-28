@@ -404,16 +404,12 @@ void XDRServer::updateRDS(uint16_t blockA, uint16_t blockB, uint16_t blockC,
                           uint16_t blockD, uint8_t errors) {
   m_lastRdsMs = steadyNowMs();
 
-  char buffer[32];
-  std::snprintf(buffer, sizeof(buffer), "R%04X%04X%04X%02X", blockB, blockC,
-                blockD, errors);
-  std::string rLine(buffer);
-
   std::lock_guard<std::mutex> lock(m_rdsMutex);
 
   constexpr size_t kMaxRdsQueue = 256;
 
   const uint8_t blockAErr = static_cast<uint8_t>((errors >> 6) & 0x03u);
+  const uint8_t blockBErr = static_cast<uint8_t>((errors >> 4) & 0x03u);
 
   m_piPos = (m_piPos + 1) % 64;
   m_piBuffer[m_piPos] = blockA;
@@ -446,10 +442,17 @@ void XDRServer::updateRDS(uint16_t blockA, uint16_t blockB, uint16_t blockC,
     m_piLastValue = blockA;
   }
 
-  if (m_rdsQueue.size() >= kMaxRdsQueue) {
-    m_rdsQueue.pop_front();
+  // PTY/TP/TA/MS bits are in block B. Drop groups where block B had errors to
+  // avoid noisy flag flapping in clients.
+  if (blockBErr == 0) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "R%04X%04X%04X%02X", blockB, blockC,
+                  blockD, errors);
+    if (m_rdsQueue.size() >= kMaxRdsQueue) {
+      m_rdsQueue.pop_front();
+    }
+    m_rdsQueue.emplace_back(m_rdsNextSeq++, std::string(buffer));
   }
-  m_rdsQueue.emplace_back(m_rdsNextSeq++, rLine);
   m_piLastState = piState;
 }
 
