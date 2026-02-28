@@ -106,8 +106,9 @@ jobs:
     - name: Install dependencies
       run: |
         dnf install -y cmake gcc-c++ make file pkgconfig
-        dnf install -y librtlsdr-devel libusb-devel openssl-devel alsa-lib-devel liquid-devel
-        dnf install -y rpm-build
+        dnf install -y openssl-devel alsa-lib-devel
+        dnf install -y rtl-sdr-devel liquid-dsp-devel
+        dnf install -y rpm-build || true
 
     - name: Build
       run: |

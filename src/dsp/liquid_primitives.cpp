@@ -71,9 +71,13 @@ void FIRFilter::init(std::uint32_t length, float cutoff, float stopBandAtten, fl
     }
 
     m_taps.assign(length, 0.0f);
+#if LIQUID_VERSION_NUMBER >= 0x0400
+    liquid_firdes_kaiser(length, cutoff, stopBandAtten, 0.0f, m_taps.data());
+#else
     if (liquid_firdes_kaiser(length, cutoff, stopBandAtten, 0.0f, m_taps.data()) != LIQUID_OK) {
         throw std::runtime_error("failed to design liquid kaiser taps");
     }
+#endif
     const int mid = static_cast<int>(length / 2);
     constexpr float kTwoPi = 6.28318530717958647692f;
     for (std::uint32_t n = 0; n < length; ++n) {
@@ -374,9 +378,13 @@ void ComplexDecimator::init(std::uint32_t factor, std::uint32_t tapsPerPhase, fl
     const std::uint32_t hLen = m_factor * m_tapsPerPhase;
     m_taps.assign(hLen, 0.0f);
     const float cutoff = std::clamp(0.45f / static_cast<float>(m_factor), 0.01f, 0.45f);
+#if LIQUID_VERSION_NUMBER >= 0x0400
+    liquid_firdes_kaiser(hLen, cutoff, m_stopBandAtten, 0.0f, m_taps.data());
+#else
     if (liquid_firdes_kaiser(hLen, cutoff, m_stopBandAtten, 0.0f, m_taps.data()) != LIQUID_OK) {
         throw std::runtime_error("failed to design complex decimator taps");
     }
+#endif
     m_object = firdecim_crcf_create(m_factor, m_taps.data(), hLen);
     if (m_object == nullptr) {
         throw std::runtime_error("failed to create liquid firdecim_crcf");
