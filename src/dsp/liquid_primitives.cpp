@@ -1,4 +1,5 @@
 #include "dsp/liquid_primitives.h"
+#include <liquid/liquid.h>
 
 #include <algorithm>
 #include <cmath>

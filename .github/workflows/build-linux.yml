@@ -108,6 +108,7 @@ jobs:
         dnf install -y cmake gcc-c++ make file pkgconfig
         dnf install -y openssl-devel alsa-lib-devel
         dnf install -y rtl-sdr-devel liquid-dsp-devel
+        dnf install -y catch2-devel || true
         dnf install -y rpm-build || true
 
     - name: Build
