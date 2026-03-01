@@ -14,6 +14,7 @@ endif()
 add_executable(test_signal_level test_signal_level.cpp
     ${FM_TUNER_TEST_MAIN_SOURCE}
     ${CMAKE_SOURCE_DIR}/src/signal_level.cpp
+    ${CMAKE_SOURCE_DIR}/src/cpu_features.cpp
 )
 target_include_directories(test_signal_level PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -176,6 +177,7 @@ add_executable(test_scan_engine test_scan_engine.cpp
     ${FM_TUNER_TEST_MAIN_SOURCE}
     ${CMAKE_SOURCE_DIR}/src/scan_engine.cpp
     ${CMAKE_SOURCE_DIR}/src/signal_level.cpp
+    ${CMAKE_SOURCE_DIR}/src/cpu_features.cpp
     ${CMAKE_SOURCE_DIR}/src/xdr_server.cpp
     ${CMAKE_SOURCE_DIR}/src/dsp/liquid_primitives.cpp
 )
